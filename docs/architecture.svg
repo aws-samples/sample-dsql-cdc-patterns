@@ -1,0 +1,220 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" font-family="'Amazon Ember', 'Helvetica Neue', Roboto, Arial, sans-serif">
+  <defs>
+    <!-- AWS service colors -->
+    <linearGradient id="dsql" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3B48CC"/>
+      <stop offset="100%" stop-color="#2E27AD"/>
+    </linearGradient>
+    <linearGradient id="kinesis" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#8C4FFF"/>
+      <stop offset="100%" stop-color="#6B3BC2"/>
+    </linearGradient>
+    <linearGradient id="firehose" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#8C4FFF"/>
+      <stop offset="100%" stop-color="#6B3BC2"/>
+    </linearGradient>
+    <linearGradient id="lambda" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ED7100"/>
+      <stop offset="100%" stop-color="#C25500"/>
+    </linearGradient>
+    <linearGradient id="s3" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3F8624"/>
+      <stop offset="100%" stop-color="#2D6B19"/>
+    </linearGradient>
+    <linearGradient id="opensearch" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#005EB8"/>
+      <stop offset="100%" stop-color="#00478C"/>
+    </linearGradient>
+    <linearGradient id="bedrock" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#01A88D"/>
+      <stop offset="100%" stop-color="#00836E"/>
+    </linearGradient>
+    <linearGradient id="s3vec" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3F8624"/>
+      <stop offset="100%" stop-color="#2D6B19"/>
+    </linearGradient>
+    <linearGradient id="iceberg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#8C4FFF"/>
+      <stop offset="100%" stop-color="#6B3BC2"/>
+    </linearGradient>
+    <linearGradient id="glue" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#8C4FFF"/>
+      <stop offset="100%" stop-color="#6B3BC2"/>
+    </linearGradient>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.15"/>
+    </filter>
+    <marker id="arrow" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <path d="M0,0 L7,2.5 L0,5" fill="#879196"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <path d="M0,0 L7,2.5 L0,5" fill="#EC7211"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="960" height="540" rx="8" fill="#F2F3F3"/>
+
+  <!-- Header bar - squid ink -->
+  <rect x="0" y="0" width="960" height="50" rx="8" fill="#232F3E"/>
+  <rect x="0" y="8" width="960" height="42" fill="#232F3E"/>
+  <!-- Orange accent line -->
+  <rect x="0" y="50" width="960" height="3" fill="#FF9900"/>
+  <!-- Title -->
+  <text x="480" y="32" text-anchor="middle" fill="#FFFFFF" font-size="15" font-weight="600" letter-spacing="0.5">Aurora DSQL  ·  Change Data Capture Patterns</text>
+
+  <!-- ===== DSQL Source ===== -->
+  <rect x="396" y="74" width="168" height="54" rx="8" fill="url(#dsql)" filter="url(#shadow)"/>
+  <!-- Small AWS icon hint -->
+  <rect x="404" y="82" width="4" height="38" rx="2" fill="#FF9900" opacity="0.7"/>
+  <text x="484" y="97" text-anchor="middle" fill="#FFFFFF" font-size="13" font-weight="600">Aurora DSQL</text>
+  <text x="484" y="115" text-anchor="middle" fill="#C5CAE9" font-size="10">Source Database</text>
+
+  <!-- Arrow: DSQL → Kinesis -->
+  <line x1="480" y1="128" x2="480" y2="150" stroke="#879196" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect x="490" y="132" width="28" height="14" rx="3" fill="#FF9900"/>
+  <text x="504" y="143" text-anchor="middle" fill="#FFFFFF" font-size="8" font-weight="600">CDC</text>
+
+  <!-- ===== Kinesis ===== -->
+  <rect x="396" y="154" width="168" height="54" rx="8" fill="url(#kinesis)" filter="url(#shadow)"/>
+  <rect x="404" y="162" width="4" height="38" rx="2" fill="#FF9900" opacity="0.7"/>
+  <text x="484" y="177" text-anchor="middle" fill="#FFFFFF" font-size="13" font-weight="600">Kinesis Data Streams</text>
+  <text x="484" y="195" text-anchor="middle" fill="#D1C4E9" font-size="10">CDC Events</text>
+
+  <!-- Fan-out arrows -->
+  <path d="M428,208 Q428,230 129,258" stroke="#879196" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <path d="M448,208 Q448,232 300,258" stroke="#879196" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <line x1="480" y1="208" x2="480" y2="258" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M512,208 Q512,232 660,258" stroke="#879196" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <path d="M532,208 Q532,230 831,258" stroke="#879196" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+
+  <!-- ===== Pattern 1: Firehose → S3 ===== -->
+  <g>
+    <!-- Column background -->
+    <rect x="44" y="248" width="170" height="268" rx="6" fill="#FFFFFF" stroke="#D5DBDB" stroke-width="1" filter="url(#shadow)"/>
+    <!-- Pattern number badge -->
+    <rect x="44" y="248" width="170" height="28" rx="6" fill="#232F3E"/>
+    <rect x="44" y="262" width="170" height="14" fill="#232F3E"/>
+    <text x="129" y="267" text-anchor="middle" fill="#FF9900" font-size="11" font-weight="700">PATTERN 1</text>
+
+    <rect x="62" y="288" width="134" height="46" rx="6" fill="url(#firehose)" filter="url(#shadow)"/>
+    <text x="129" y="308" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">Firehose</text>
+    <text x="129" y="323" text-anchor="middle" fill="#D1C4E9" font-size="9">Delivery Stream</text>
+
+    <line x1="129" y1="334" x2="129" y2="358" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <rect x="62" y="362" width="134" height="46" rx="6" fill="url(#s3)" filter="url(#shadow)"/>
+    <text x="129" y="382" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">Amazon S3</text>
+    <text x="129" y="397" text-anchor="middle" fill="#C8E6C9" font-size="9">JSON Archive</text>
+
+    <!-- Use case label -->
+    <text x="129" y="432" text-anchor="middle" fill="#545B64" font-size="9" font-weight="500">Archival &amp; Batch</text>
+    <text x="129" y="444" text-anchor="middle" fill="#545B64" font-size="9" font-weight="500">Analytics</text>
+
+    <!-- Port -->
+    <rect x="98" y="456" width="62" height="18" rx="9" fill="#FF9900" opacity="0.15"/>
+    <text x="129" y="469" text-anchor="middle" fill="#C25500" font-size="9" font-weight="600">:8000</text>
+  </g>
+
+  <!-- ===== Pattern 2: Materialized Table ===== -->
+  <g>
+    <rect x="223" y="248" width="170" height="268" rx="6" fill="#FFFFFF" stroke="#D5DBDB" stroke-width="1" filter="url(#shadow)"/>
+    <rect x="223" y="248" width="170" height="28" rx="6" fill="#232F3E"/>
+    <rect x="223" y="262" width="170" height="14" fill="#232F3E"/>
+    <text x="308" y="267" text-anchor="middle" fill="#FF9900" font-size="11" font-weight="700">PATTERN 2</text>
+
+    <rect x="241" y="288" width="134" height="46" rx="6" fill="url(#lambda)" filter="url(#shadow)"/>
+    <text x="308" y="308" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">Lambda</text>
+    <text x="308" y="323" text-anchor="middle" fill="#FFE0B2" font-size="9">CDC Consumer</text>
+
+    <line x1="308" y1="334" x2="308" y2="358" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <rect x="241" y="362" width="134" height="46" rx="6" fill="url(#dsql)" filter="url(#shadow)"/>
+    <text x="308" y="382" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">Aurora DSQL</text>
+    <text x="308" y="397" text-anchor="middle" fill="#C5CAE9" font-size="9">Materialized Table</text>
+
+    <text x="308" y="432" text-anchor="middle" fill="#545B64" font-size="9" font-weight="500">Pre-computed</text>
+    <text x="308" y="444" text-anchor="middle" fill="#545B64" font-size="9" font-weight="500">Aggregates</text>
+
+    <rect x="277" y="456" width="62" height="18" rx="9" fill="#FF9900" opacity="0.15"/>
+    <text x="308" y="469" text-anchor="middle" fill="#C25500" font-size="9" font-weight="600">:8001</text>
+  </g>
+
+  <!-- ===== Pattern 3: Iceberg ===== -->
+  <g>
+    <rect x="402" y="248" width="170" height="268" rx="6" fill="#FFFFFF" stroke="#D5DBDB" stroke-width="1" filter="url(#shadow)"/>
+    <rect x="402" y="248" width="170" height="28" rx="6" fill="#232F3E"/>
+    <rect x="402" y="262" width="170" height="14" fill="#232F3E"/>
+    <text x="487" y="267" text-anchor="middle" fill="#FF9900" font-size="11" font-weight="700">PATTERN 3</text>
+
+    <rect x="420" y="288" width="134" height="46" rx="6" fill="url(#iceberg)" filter="url(#shadow)"/>
+    <text x="487" y="308" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">Firehose</text>
+    <text x="487" y="323" text-anchor="middle" fill="#D1C4E9" font-size="9">+ Lambda Transform</text>
+
+    <line x1="487" y1="334" x2="487" y2="358" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <rect x="420" y="362" width="134" height="46" rx="6" fill="url(#glue)" filter="url(#shadow)"/>
+    <text x="487" y="382" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">Iceberg + AWS Glue</text>
+    <text x="487" y="397" text-anchor="middle" fill="#D1C4E9" font-size="9">Athena Analytics</text>
+
+    <text x="487" y="432" text-anchor="middle" fill="#545B64" font-size="9" font-weight="500">Lakehouse</text>
+    <text x="487" y="444" text-anchor="middle" fill="#545B64" font-size="9" font-weight="500">Analytics</text>
+
+    <rect x="456" y="456" width="62" height="18" rx="9" fill="#FF9900" opacity="0.15"/>
+    <text x="487" y="469" text-anchor="middle" fill="#C25500" font-size="9" font-weight="600">:8002</text>
+  </g>
+
+  <!-- ===== Pattern 4: OpenSearch ===== -->
+  <g>
+    <rect x="581" y="248" width="170" height="268" rx="6" fill="#FFFFFF" stroke="#D5DBDB" stroke-width="1" filter="url(#shadow)"/>
+    <rect x="581" y="248" width="170" height="28" rx="6" fill="#232F3E"/>
+    <rect x="581" y="262" width="170" height="14" fill="#232F3E"/>
+    <text x="666" y="267" text-anchor="middle" fill="#FF9900" font-size="11" font-weight="700">PATTERN 4</text>
+
+    <rect x="599" y="288" width="134" height="46" rx="6" fill="url(#lambda)" filter="url(#shadow)"/>
+    <text x="666" y="308" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">Lambda</text>
+    <text x="666" y="323" text-anchor="middle" fill="#FFE0B2" font-size="9">CDC Consumer</text>
+
+    <line x1="666" y1="334" x2="666" y2="358" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <rect x="599" y="362" width="134" height="46" rx="6" fill="url(#opensearch)" filter="url(#shadow)"/>
+    <text x="666" y="382" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">OpenSearch</text>
+    <text x="666" y="397" text-anchor="middle" fill="#B3E5FC" font-size="9">Serverless</text>
+
+    <text x="666" y="432" text-anchor="middle" fill="#545B64" font-size="9" font-weight="500">Full-Text Search</text>
+    <text x="666" y="444" text-anchor="middle" fill="#545B64" font-size="9" font-weight="500">Autocomplete &amp; Facets</text>
+
+    <rect x="635" y="456" width="62" height="18" rx="9" fill="#FF9900" opacity="0.15"/>
+    <text x="666" y="469" text-anchor="middle" fill="#C25500" font-size="9" font-weight="600">:8003</text>
+  </g>
+
+  <!-- ===== Pattern 5: S3 Vectors ===== -->
+  <g>
+    <rect x="760" y="248" width="170" height="268" rx="6" fill="#FFFFFF" stroke="#D5DBDB" stroke-width="1" filter="url(#shadow)"/>
+    <rect x="760" y="248" width="170" height="28" rx="6" fill="#232F3E"/>
+    <rect x="760" y="262" width="170" height="14" fill="#232F3E"/>
+    <text x="845" y="267" text-anchor="middle" fill="#FF9900" font-size="11" font-weight="700">PATTERN 5</text>
+
+    <rect x="778" y="288" width="134" height="46" rx="6" fill="url(#lambda)" filter="url(#shadow)"/>
+    <text x="845" y="308" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">Lambda</text>
+    <text x="845" y="323" text-anchor="middle" fill="#FFE0B2" font-size="9">CDC Consumer</text>
+
+    <line x1="845" y1="334" x2="845" y2="358" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <rect x="778" y="362" width="134" height="38" rx="6" fill="url(#bedrock)" filter="url(#shadow)"/>
+    <text x="845" y="378" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">Bedrock</text>
+    <text x="845" y="392" text-anchor="middle" fill="#B2DFDB" font-size="9">Titan Embed V2</text>
+
+    <line x1="845" y1="400" x2="845" y2="416" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <rect x="778" y="420" width="134" height="38" rx="6" fill="url(#s3vec)" filter="url(#shadow)"/>
+    <text x="845" y="436" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">S3 Vectors</text>
+    <text x="845" y="450" text-anchor="middle" fill="#C8E6C9" font-size="9">Vector Buckets</text>
+
+    <text x="845" y="478" text-anchor="middle" fill="#545B64" font-size="9" font-weight="500">Semantic Search</text>
+    <text x="845" y="490" text-anchor="middle" fill="#545B64" font-size="9" font-weight="500">with Embeddings</text>
+
+    <rect x="814" y="498" width="62" height="18" rx="9" fill="#FF9900" opacity="0.15"/>
+    <text x="845" y="511" text-anchor="middle" fill="#C25500" font-size="9" font-weight="600">:8004</text>
+  </g>
+</svg>

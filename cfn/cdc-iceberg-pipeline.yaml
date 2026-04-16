@@ -1,0 +1,691 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Amazon Aurora DSQL CDC to Iceberg via Amazon Data Firehose.
+  Creates an Amazon Kinesis data stream, two Amazon Data Firehose delivery streams with Iceberg
+  destination, two AWS Lambda transforms (append + merge), AWS Glue Data Catalog
+  with Iceberg tables, Amazon S3 warehouse bucket, Amazon Athena workgroup, and IAM roles.
+
+Parameters:
+  DsqlClusterId:
+    Type: String
+    Description: DSQL cluster identifier
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for Lambda functions
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnet IDs for Lambda functions (comma-separated)
+
+  VpcCidr:
+    Type: String
+    Description: VPC CIDR block for Lambda egress rules
+
+Resources:
+  # -------------------------------------------------------------------
+  # Kinesis data stream for CDC events
+  # -------------------------------------------------------------------
+  CdcKinesisStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      ShardCount: 1
+      StreamEncryption:
+        EncryptionType: KMS
+        KeyId: alias/aws/kinesis
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-iceberg
+
+  # -------------------------------------------------------------------
+  # IAM role: DSQL -> Kinesis (CDC writes)
+  # -------------------------------------------------------------------
+  CdcRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Allows DSQL to write CDC events to Kinesis for the Iceberg pattern
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: dsql.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnEquals:
+                aws:SourceArn: !Sub "arn:aws:dsql:*:${AWS::AccountId}:cluster/*"
+      ManagedPolicyArns:
+        - !Ref CdcRolePolicy
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-iceberg
+
+  CdcRolePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Allows DSQL CDC to write events to the Kinesis data stream
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: WriteToKinesisStream
+            Effect: Allow
+            Action:
+              - kinesis:PutRecord
+              - kinesis:PutRecords
+              - kinesis:DescribeStreamSummary
+              - kinesis:ListShards
+            Resource: !GetAtt CdcKinesisStream.Arn
+
+  # -------------------------------------------------------------------
+  # S3 bucket (Iceberg warehouse)
+  # -------------------------------------------------------------------
+  IcebergBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ObjectLockEnabled: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 90
+          - Id: TransitionToGlacier
+            Status: Enabled
+            Transitions:
+              - StorageClass: GLACIER
+                TransitionInDays: 365
+      LoggingConfiguration:
+        LogFilePrefix: access-logs/
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-iceberg
+
+  IcebergBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref IcebergBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub "arn:aws:s3:::${IcebergBucket}"
+              - !Sub "arn:aws:s3:::${IcebergBucket}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  # -------------------------------------------------------------------
+  # AWS Glue Data Catalog: database + Iceberg tables
+  # -------------------------------------------------------------------
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: dsql_cdc_iceberg
+        Description: DSQL CDC events stored as Apache Iceberg tables
+
+  CdcEventsTable:
+    Type: AWS::Glue::Table
+    DependsOn: GlueDatabase
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: dsql_cdc_iceberg
+      OpenTableFormatInput:
+        IcebergInput:
+          MetadataOperation: CREATE
+          Version: '2'
+      TableInput:
+        Name: cdc_events
+        Description: Append-only CDC audit trail — every change event as an insert
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          format: parquet
+        StorageDescriptor:
+          Location: !Sub "s3://${IcebergBucket}/dsql_cdc_iceberg/cdc_events"
+          Columns:
+            - Name: id
+              Type: string
+            - Name: name
+              Type: string
+            - Name: email
+              Type: string
+            - Name: created_at
+              Type: string
+            - Name: _cdc_op
+              Type: string
+              Comment: "CDC operation: c=create, u=update, d=delete"
+            - Name: _cdc_tx_id
+              Type: string
+              Comment: DSQL transaction ID
+            - Name: _cdc_ts_ms
+              Type: bigint
+              Comment: CDC event timestamp (ms since epoch)
+            - Name: _cdc_source_table
+              Type: string
+              Comment: Source table name in DSQL
+            - Name: _cdc_commit_ts_ns
+              Type: bigint
+              Comment: Transaction commit timestamp (ns since epoch) from source.ts_ns
+          InputFormat: org.apache.hadoop.mapred.FileInputFormat
+          OutputFormat: org.apache.hadoop.mapred.FileOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
+
+  CurrentStateTable:
+    Type: AWS::Glue::Table
+    DependsOn: GlueDatabase
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: dsql_cdc_iceberg
+      OpenTableFormatInput:
+        IcebergInput:
+          MetadataOperation: CREATE
+          Version: '2'
+      TableInput:
+        Name: current_state
+        Description: Current state of DSQL events table — merge mode with upserts and tombstone deletes
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          format: parquet
+        StorageDescriptor:
+          Location: !Sub "s3://${IcebergBucket}/dsql_cdc_iceberg/current_state"
+          Columns:
+            - Name: id
+              Type: string
+            - Name: name
+              Type: string
+            - Name: email
+              Type: string
+            - Name: created_at
+              Type: string
+            - Name: _cdc_commit_ts_ns
+              Type: bigint
+              Comment: Transaction commit timestamp (ns since epoch) from source.ts_ns
+            - Name: _is_deleted
+              Type: boolean
+              Comment: Tombstone flag — true when the row has been deleted
+          InputFormat: org.apache.hadoop.mapred.FileInputFormat
+          OutputFormat: org.apache.hadoop.mapred.FileOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
+
+  # -------------------------------------------------------------------
+  # Athena workgroup
+  # -------------------------------------------------------------------
+  AthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub "${AWS::StackName}-workgroup"
+      Description: Workgroup for DSQL CDC Iceberg demo queries
+      State: ENABLED
+      RecursiveDeleteOption: true
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${IcebergBucket}/athena-results/"
+        EngineVersion:
+          SelectedEngineVersion: "Athena engine version 3"
+
+  # -------------------------------------------------------------------
+  # CloudWatch logging for Firehose
+  # -------------------------------------------------------------------
+  # -------------------------------------------------------------------
+  # KMS key for CloudWatch Logs encryption
+  # -------------------------------------------------------------------
+  LogGroupKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Encrypts the Firehose CloudWatch log group
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowAccountRoot
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+            Condition:
+              ArnEquals:
+                kms:EncryptionContext:aws:logs:arn: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-iceberg
+
+  FirehoseLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      RetentionInDays: 30
+      KmsKeyId: !GetAtt LogGroupKey.Arn
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-iceberg
+
+  AppendLogStream:
+    Type: AWS::Logs::LogStream
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Ref FirehoseLogGroup
+      LogStreamName: AppendDelivery
+
+  MergeLogStream:
+    Type: AWS::Logs::LogStream
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Ref FirehoseLogGroup
+      LogStreamName: MergeDelivery
+
+  # -------------------------------------------------------------------
+  # Lambda transform functions
+  # -------------------------------------------------------------------
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda transform functions (outbound only)
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+          Description: HTTPS within VPC
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-iceberg
+
+  # Dead-letter queue for Lambda transform failures
+  # -------------------------------------------------------------------
+  LambdaDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: alias/aws/sqs
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-iceberg
+
+  AppendTransformRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Lambda execution role for append transform function
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - !Ref LambdaDlqSendPolicy
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-iceberg
+
+  MergeTransformRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Lambda execution role for merge transform function
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - !Ref LambdaDlqSendPolicy
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-iceberg
+
+  LambdaDlqSendPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Allows Lambda functions to send failed events to the DLQ
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: SendToDlq
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt LambdaDlq.Arn
+
+  AppendTransformFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Flattens DSQL CDC events for append-only Iceberg delivery (cdc_events)
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 60
+      MemorySize: 256
+      ReservedConcurrentExecutions: 10
+      DeadLetterConfig:
+        TargetArn: !GetAtt LambdaDlq.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !Ref SubnetIds
+      Role: !GetAtt AppendTransformRole.Arn
+      Environment:
+        Variables:
+          TRANSFORM_MODE: append
+          LOG_LEVEL: INFO
+      Code:
+        ZipFile: |
+          import base64,json
+          import os
+          MODE=os.environ.get('TRANSFORM_MODE','append')
+          DB='dsql_cdc_iceberg'
+          def handler(event,ctx):
+              out=[]
+              for r in event.get('records',[]):
+                  try:
+                      p=json.loads(base64.b64decode(r['data']))
+                      row=p.get('before') if p.get('op')=='d' else p.get('after')
+                      if not row:
+                          out.append({'recordId':r['recordId'],'result':'ProcessingFailed','data':''})
+                          continue
+                      f={'id':row.get('id'),'name':row.get('name'),'email':row.get('email'),'created_at':row.get('created_at'),'_cdc_op':p.get('op'),'_cdc_tx_id':p.get('txId'),'_cdc_ts_ms':p.get('ts_ms'),'_cdc_source_table':p.get('source',{}).get('table'),'_cdc_commit_ts_ns':p.get('source',{}).get('ts_ns')}
+                      d=base64.b64encode((json.dumps(f,separators=(',',':'))+'\n').encode()).decode()
+                      out.append({'recordId':r['recordId'],'result':'Ok','data':d,'metadata':{'otfMetadata':{'destinationDatabaseName':DB,'destinationTableName':'cdc_events','operation':'insert'}}})
+                  except Exception:
+                      out.append({'recordId':r['recordId'],'result':'ProcessingFailed','data':r['data']})
+              return {'records':out}
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-iceberg
+
+  MergeTransformFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Flattens DSQL CDC events for merge Iceberg delivery (current_state)
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 60
+      MemorySize: 256
+      ReservedConcurrentExecutions: 10
+      DeadLetterConfig:
+        TargetArn: !GetAtt LambdaDlq.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !Ref SubnetIds
+      Role: !GetAtt MergeTransformRole.Arn
+      Environment:
+        Variables:
+          TRANSFORM_MODE: merge
+          LOG_LEVEL: INFO
+      Code:
+        ZipFile: |
+          import base64,json
+          import os
+          MODE=os.environ.get('TRANSFORM_MODE','merge')
+          DB='dsql_cdc_iceberg'
+          def handler(event,ctx):
+              out=[]
+              for r in event.get('records',[]):
+                  try:
+                      p=json.loads(base64.b64decode(r['data']))
+                      cdc_op=p.get('op','c')
+                      row=p.get('before') if cdc_op=='d' else p.get('after')
+                      if not row:
+                          out.append({'recordId':r['recordId'],'result':'ProcessingFailed','data':''})
+                          continue
+                      f={'id':row.get('id'),'name':row.get('name'),'email':row.get('email'),'created_at':row.get('created_at'),'_cdc_commit_ts_ns':p.get('source',{}).get('ts_ns'),'_is_deleted':cdc_op=='d'}
+                      d=base64.b64encode((json.dumps(f,separators=(',',':'))+'\n').encode()).decode()
+                      out.append({'recordId':r['recordId'],'result':'Ok','data':d,'metadata':{'otfMetadata':{'destinationDatabaseName':DB,'destinationTableName':'current_state','operation':'upsert'}}})
+                  except Exception:
+                      out.append({'recordId':r['recordId'],'result':'ProcessingFailed','data':r['data']})
+              return {'records':out}
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-iceberg
+
+  # -------------------------------------------------------------------
+  # IAM role for Firehose
+  # -------------------------------------------------------------------
+  FirehoseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Allows Amazon Data Firehose to read from Amazon Kinesis, write to Amazon S3 (Iceberg), and access AWS Glue Data Catalog
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: FirehoseAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadFromKinesisStream
+                Effect: Allow
+                Action:
+                  - kinesis:DescribeStream
+                  - kinesis:DescribeStreamSummary
+                  - kinesis:GetShardIterator
+                  - kinesis:GetRecords
+                  - kinesis:ListShards
+                  - kinesis:SubscribeToShard
+                Resource: !GetAtt CdcKinesisStream.Arn
+              - Sid: WriteToS3Bucket
+                # s3:DeleteObject is required for Iceberg merge-mode compaction
+                # and file cleanup during table maintenance operations.
+                Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - !GetAtt IcebergBucket.Arn
+                  - !Sub "${IcebergBucket.Arn}/*"
+              - Sid: GlueCatalogAccess
+                # Amazon Data Firehose requires table/partition create and update
+                # permissions for Iceberg table maintenance (schema evolution,
+                # snapshot commits, and partition management).
+                Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetDatabases
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:GetTableVersion
+                  - glue:GetTableVersions
+                  - glue:UpdateTable
+                  - glue:CreateTable
+                  - glue:GetPartition
+                  - glue:GetPartitions
+                  - glue:CreatePartition
+                  - glue:BatchCreatePartition
+                  - glue:BatchGetPartition
+                Resource:
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/dsql_cdc_iceberg"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/dsql_cdc_iceberg/*"
+              - Sid: WriteCloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:PutLogEvents
+                Resource: !GetAtt FirehoseLogGroup.Arn
+              - Sid: InvokeLambdaTransforms
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                  - lambda:GetFunctionConfiguration
+                Resource:
+                  - !GetAtt AppendTransformFunction.Arn
+                  - !Sub "${AppendTransformFunction.Arn}:*"
+                  - !GetAtt MergeTransformFunction.Arn
+                  - !Sub "${MergeTransformFunction.Arn}:*"
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-iceberg
+
+  # -------------------------------------------------------------------
+  # Firehose 1: Append-only CDC events -> cdc_events
+  # -------------------------------------------------------------------
+  AppendDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    DependsOn:
+      - FirehoseRole
+      - CdcEventsTable
+    Properties:
+      DeliveryStreamType: KinesisStreamAsSource
+      KinesisStreamSourceConfiguration:
+        KinesisStreamARN: !GetAtt CdcKinesisStream.Arn
+        RoleARN: !GetAtt FirehoseRole.Arn
+      IcebergDestinationConfiguration:
+        RoleARN: !GetAtt FirehoseRole.Arn
+        CatalogConfiguration:
+          CatalogARN: !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+        S3Configuration:
+          BucketARN: !GetAtt IcebergBucket.Arn
+          RoleARN: !GetAtt FirehoseRole.Arn
+          BufferingHints:
+            SizeInMBs: 1
+            IntervalInSeconds: 60
+          CloudWatchLoggingOptions:
+            Enabled: true
+            LogGroupName: !Ref FirehoseLogGroup
+            LogStreamName: AppendDelivery
+        BufferingHints:
+          SizeInMBs: 1
+          IntervalInSeconds: 60
+        DestinationTableConfigurationList:
+          - DestinationDatabaseName: dsql_cdc_iceberg
+            DestinationTableName: cdc_events
+        ProcessingConfiguration:
+          Enabled: true
+          Processors:
+            - Type: Lambda
+              Parameters:
+                - ParameterName: LambdaArn
+                  ParameterValue: !GetAtt AppendTransformFunction.Arn
+                - ParameterName: BufferSizeInMBs
+                  ParameterValue: '3'
+                - ParameterName: BufferIntervalInSeconds
+                  ParameterValue: '60'
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: !Ref FirehoseLogGroup
+          LogStreamName: AppendDelivery
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-iceberg
+
+  # -------------------------------------------------------------------
+  # Firehose 2: Merge to current_state
+  # -------------------------------------------------------------------
+  MergeDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    DependsOn:
+      - FirehoseRole
+      - CurrentStateTable
+    Properties:
+      DeliveryStreamType: KinesisStreamAsSource
+      KinesisStreamSourceConfiguration:
+        KinesisStreamARN: !GetAtt CdcKinesisStream.Arn
+        RoleARN: !GetAtt FirehoseRole.Arn
+      IcebergDestinationConfiguration:
+        RoleARN: !GetAtt FirehoseRole.Arn
+        CatalogConfiguration:
+          CatalogARN: !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+        S3Configuration:
+          BucketARN: !GetAtt IcebergBucket.Arn
+          RoleARN: !GetAtt FirehoseRole.Arn
+          BufferingHints:
+            SizeInMBs: 1
+            IntervalInSeconds: 60
+          CloudWatchLoggingOptions:
+            Enabled: true
+            LogGroupName: !Ref FirehoseLogGroup
+            LogStreamName: MergeDelivery
+        BufferingHints:
+          SizeInMBs: 1
+          IntervalInSeconds: 60
+        DestinationTableConfigurationList:
+          - DestinationDatabaseName: dsql_cdc_iceberg
+            DestinationTableName: current_state
+            UniqueKeys:
+              - id
+        ProcessingConfiguration:
+          Enabled: true
+          Processors:
+            - Type: Lambda
+              Parameters:
+                - ParameterName: LambdaArn
+                  ParameterValue: !GetAtt MergeTransformFunction.Arn
+                - ParameterName: BufferSizeInMBs
+                  ParameterValue: '3'
+                - ParameterName: BufferIntervalInSeconds
+                  ParameterValue: '60'
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: !Ref FirehoseLogGroup
+          LogStreamName: MergeDelivery
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-iceberg
+
+Outputs:
+  IcebergBucketName:
+    Value: !Ref IcebergBucket
+    Description: S3 bucket for Iceberg warehouse data
+  KinesisStreamArn:
+    Value: !GetAtt CdcKinesisStream.Arn
+    Description: ARN of the Amazon Kinesis data stream for CDC events
+  CdcRoleArn:
+    Value: !GetAtt CdcRole.Arn
+    Description: ARN of the IAM role used by DSQL to write CDC events
+  GlueDatabaseName:
+    Value: dsql_cdc_iceberg
+    Description: AWS Glue Data Catalog database for Iceberg tables
+  AthenaWorkgroupName:
+    Value: !Ref AthenaWorkGroup
+    Description: Athena workgroup for Iceberg queries
+  DsqlClusterHost:
+    Value: !Sub "${DsqlClusterId}.dsql.${AWS::Region}.on.aws"
+    Description: DSQL cluster hostname for client connections
+  DsqlClusterId:
+    Value: !Ref DsqlClusterId
+    Description: DSQL cluster identifier
