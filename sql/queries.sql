@@ -82,3 +82,66 @@ SELECT id, name, email, created_at, _cdc_commit_ts_ns
 FROM "dsql_cdc_iceberg"."current_state"
 WHERE _is_deleted = true
 ORDER BY _cdc_commit_ts_ns DESC;
+
+
+-- =============================================================================
+-- Ordering-safe current state (reconstructed from the append-only log)
+-- =============================================================================
+-- The current_state table is maintained by Firehose merge mode, which applies
+-- upserts in the order Firehose PROCESSES records -- it does NOT compare
+-- _cdc_commit_ts_ns. Under out-of-order delivery, a stale UPDATE can overwrite
+-- a newer one, or a late UPDATE can un-tombstone a deleted row.
+--
+-- DSQL guarantees source.ts_ns (stored here as _cdc_commit_ts_ns) establishes a
+-- TOTAL ORDER of transactions. The append-only cdc_events table retains every
+-- version, so we can reconstruct a correct current state by taking the latest
+-- event per id by that total-order key -- independent of Firehose merge order.
+
+-- 10. Ordering-safe current state as a reusable Athena view.
+--     Run once; then query "current_state_ordered" like any table.
+CREATE OR REPLACE VIEW "dsql_cdc_iceberg"."current_state_ordered" AS
+WITH ranked AS (
+    SELECT id, name, email, created_at, _cdc_op, _cdc_commit_ts_ns,
+           ROW_NUMBER() OVER (
+               PARTITION BY id
+               ORDER BY _cdc_commit_ts_ns DESC, _cdc_ts_ms DESC
+           ) AS rn
+    FROM "dsql_cdc_iceberg"."cdc_events"
+)
+SELECT id, name, email, created_at, _cdc_commit_ts_ns
+FROM ranked
+WHERE rn = 1
+  AND _cdc_op <> 'd';   -- drop ids whose latest state is a delete
+
+-- 11. Query the ordering-safe current state
+SELECT id, name, email, created_at, _cdc_commit_ts_ns
+FROM "dsql_cdc_iceberg"."current_state_ordered"
+ORDER BY _cdc_commit_ts_ns DESC;
+
+-- 12. Detect merge-ordering anomalies: rows where the Firehose merge table
+--     disagrees with the ordering-safe reconstruction (email diff or a row that
+--     the log says is deleted but current_state still shows as live).
+WITH ranked AS (
+    SELECT id, name, email, _cdc_op, _cdc_commit_ts_ns,
+           ROW_NUMBER() OVER (
+               PARTITION BY id
+               ORDER BY _cdc_commit_ts_ns DESC, _cdc_ts_ms DESC
+           ) AS rn
+    FROM "dsql_cdc_iceberg"."cdc_events"
+),
+latest AS (
+    SELECT id, name, email, _cdc_op, _cdc_commit_ts_ns
+    FROM ranked
+    WHERE rn = 1
+)
+SELECT cs.id,
+       cs.email      AS merge_email,
+       latest.email  AS ordered_email,
+       cs._is_deleted        AS merge_is_deleted,
+       (latest._cdc_op = 'd') AS ordered_is_deleted,
+       cs._cdc_commit_ts_ns   AS merge_commit_ts_ns,
+       latest._cdc_commit_ts_ns AS ordered_commit_ts_ns
+FROM "dsql_cdc_iceberg"."current_state" cs
+JOIN latest ON latest.id = cs.id
+WHERE cs._is_deleted <> (latest._cdc_op = 'd')
+   OR cs.email IS DISTINCT FROM latest.email;

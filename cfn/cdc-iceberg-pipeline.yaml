@@ -178,7 +178,7 @@ Resources:
               Comment: DSQL transaction ID
             - Name: _cdc_ts_ms
               Type: bigint
-              Comment: CDC event timestamp (ms since epoch)
+              Comment: Transaction commit timestamp (ms since epoch) from source.ts_ms
             - Name: _cdc_source_table
               Type: string
               Comment: Source table name in DSQL
@@ -406,20 +406,34 @@ Resources:
           LOG_LEVEL: INFO
       Code:
         ZipFile: |
-          import base64,json
-          import os
+          import base64,json,os,datetime
           MODE=os.environ.get('TRANSFORM_MODE','append')
           DB='dsql_cdc_iceberg'
+          # DSQL timestamptz = microseconds since epoch; convert to ISO-8601 UTC.
+          def _ts(v):
+              if isinstance(v,bool) or not isinstance(v,(int,float)):
+                  return v
+              if v in (9223372036825200000,-9223372036832400000):
+                  return None
+              try:
+                  return datetime.datetime.fromtimestamp(v/1000000,tz=datetime.timezone.utc).isoformat()
+              except (OverflowError,OSError,ValueError):
+                  return None
           def handler(event,ctx):
               out=[]
               for r in event.get('records',[]):
                   try:
                       p=json.loads(base64.b64decode(r['data']))
-                      row=p.get('before') if p.get('op')=='d' else p.get('after')
+                      if p.get('type','full')!='full':
+                          out.append({'recordId':r['recordId'],'result':'ProcessingFailed','data':''})
+                          continue
+                      op=p.get('op')
+                      row=p.get('before') if op=='d' else p.get('after')
                       if not row:
                           out.append({'recordId':r['recordId'],'result':'ProcessingFailed','data':''})
                           continue
-                      f={'id':row.get('id'),'name':row.get('name'),'email':row.get('email'),'created_at':row.get('created_at'),'_cdc_op':p.get('op'),'_cdc_tx_id':p.get('txId'),'_cdc_ts_ms':p.get('ts_ms'),'_cdc_source_table':p.get('source',{}).get('table'),'_cdc_commit_ts_ns':p.get('source',{}).get('ts_ns')}
+                      s=p.get('source',{})
+                      f={'id':row.get('id'),'name':row.get('name'),'email':row.get('email'),'created_at':_ts(row.get('created_at')),'_cdc_op':op,'_cdc_tx_id':s.get('txId'),'_cdc_ts_ms':s.get('ts_ms'),'_cdc_source_table':s.get('table'),'_cdc_commit_ts_ns':s.get('ts_ns')}
                       d=base64.b64encode((json.dumps(f,separators=(',',':'))+'\n').encode()).decode()
                       out.append({'recordId':r['recordId'],'result':'Ok','data':d,'metadata':{'otfMetadata':{'destinationDatabaseName':DB,'destinationTableName':'cdc_events','operation':'insert'}}})
                   except Exception:
@@ -451,21 +465,34 @@ Resources:
           LOG_LEVEL: INFO
       Code:
         ZipFile: |
-          import base64,json
-          import os
+          import base64,json,os,datetime
           MODE=os.environ.get('TRANSFORM_MODE','merge')
           DB='dsql_cdc_iceberg'
+          # DSQL timestamptz = microseconds since epoch; convert to ISO-8601 UTC.
+          def _ts(v):
+              if isinstance(v,bool) or not isinstance(v,(int,float)):
+                  return v
+              if v in (9223372036825200000,-9223372036832400000):
+                  return None
+              try:
+                  return datetime.datetime.fromtimestamp(v/1000000,tz=datetime.timezone.utc).isoformat()
+              except (OverflowError,OSError,ValueError):
+                  return None
           def handler(event,ctx):
               out=[]
               for r in event.get('records',[]):
                   try:
                       p=json.loads(base64.b64decode(r['data']))
-                      cdc_op=p.get('op','c')
-                      row=p.get('before') if cdc_op=='d' else p.get('after')
+                      if p.get('type','full')!='full':
+                          out.append({'recordId':r['recordId'],'result':'ProcessingFailed','data':''})
+                          continue
+                      op=p.get('op','c')
+                      row=p.get('before') if op=='d' else p.get('after')
                       if not row:
                           out.append({'recordId':r['recordId'],'result':'ProcessingFailed','data':''})
                           continue
-                      f={'id':row.get('id'),'name':row.get('name'),'email':row.get('email'),'created_at':row.get('created_at'),'_cdc_commit_ts_ns':p.get('source',{}).get('ts_ns'),'_is_deleted':cdc_op=='d'}
+                      s=p.get('source',{})
+                      f={'id':row.get('id'),'name':row.get('name'),'email':row.get('email'),'created_at':_ts(row.get('created_at')),'_cdc_commit_ts_ns':s.get('ts_ns'),'_is_deleted':op=='d'}
                       d=base64.b64encode((json.dumps(f,separators=(',',':'))+'\n').encode()).decode()
                       out.append({'recordId':r['recordId'],'result':'Ok','data':d,'metadata':{'otfMetadata':{'destinationDatabaseName':DB,'destinationTableName':'current_state','operation':'upsert'}}})
                   except Exception:
