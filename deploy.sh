@@ -14,9 +14,8 @@
 #   bash deploy.sh                            # deploy
 #   bash deploy.sh --cluster-id abc123        # reuse existing cluster
 #   bash deploy.sh --region us-west-2         # non-default region
-#   bash deploy.sh --model-path ./model.json  # DSQL CLI model file
 #
-# Prerequisites: python3, pip3, aws (v2), jq
+# Prerequisites: python3, pip3, aws (v2.34.61+), jq
 # ============================================================================
 
 set -euo pipefail
@@ -28,15 +27,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # -------------------------------------------------------------------------
 REGION="${REGION:-us-east-1}"
 CLUSTER_ID=""
-DSQL_MODEL_PATH="${DSQL_MODEL_PATH:-}"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     --region)         REGION="$2"; shift 2 ;;
     --cluster-id)     CLUSTER_ID="$2"; shift 2 ;;
-    --model-path)     DSQL_MODEL_PATH="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: $0 [--region REGION] [--cluster-id ID] [--model-path PATH]"
+      echo "Usage: $0 [--region REGION] [--cluster-id ID]"
       exit 0 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
@@ -81,45 +78,21 @@ echo "  Done."
 echo ""
 
 # =========================================================================
-# Load DSQL CLI model (required for CDC stream APIs)
+# Verify DSQL CDC stream commands are available
 # =========================================================================
-echo "--- Loading DSQL CLI model ---"
+echo "--- Checking AWS CLI for DSQL stream support ---"
 
-if aws dsql help 2>&1 | grep -q create-stream; then
-  echo "  DSQL stream commands already available."
-else
-  SEARCH_PATHS=(
-    "${DSQL_MODEL_PATH}"
-    "${SCRIPT_DIR}/dsql-2018-05-10.normal.json"
-    "./dsql-2018-05-10.normal.json"
-    "$HOME/dsql-2018-05-10.normal.json"
-  )
-  MODEL_FOUND=""
-  for p in "${SEARCH_PATHS[@]}"; do
-    if [[ -n "$p" ]] && [[ -f "$p" ]]; then
-      MODEL_FOUND="$p"
-      break
-    fi
-  done
-
-  if [[ -z "$MODEL_FOUND" ]]; then
-    echo "ERROR: DSQL CLI model not found."
-    echo ""
-    echo "  The CDC stream APIs require loading the DSQL service model."
-    echo "  Place dsql-2018-05-10.normal.json in the repo root or pass:"
-    echo "    bash deploy.sh --model-path /path/to/model.json"
-    exit 1
-  fi
-
-  echo "  Loading model from: ${MODEL_FOUND}"
-  aws configure add-model --service-model "$(cat "$MODEL_FOUND")"
-
-  if ! aws dsql help 2>&1 | grep -q create-stream; then
-    echo "ERROR: DSQL model loaded but create-stream not available."
-    exit 1
-  fi
-  echo "  Verified: create-stream command available."
+if ! aws dsql help 2>&1 | grep -q create-stream; then
+  echo "ERROR: 'aws dsql create-stream' is not available in your AWS CLI."
+  echo ""
+  echo "  Aurora DSQL CDC stream commands require AWS CLI v2.34.61 or later."
+  echo "  Your version:"
+  echo "    $(aws --version 2>&1)"
+  echo ""
+  echo "  Upgrade the AWS CLI and re-run: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+  exit 1
 fi
+echo "  DSQL stream commands available."
 echo ""
 
 # =========================================================================
