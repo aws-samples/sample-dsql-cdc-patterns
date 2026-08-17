@@ -70,9 +70,8 @@ docs/                   # Architecture docs
 **CloudShell (deploy):**
 - Python 3.9+
 - pip
-- AWS CLI v2
+- AWS CLI v2.34.61+ (includes the Aurora DSQL CDC stream commands)
 - jq 1.6+
-- DSQL CLI model file (for CDC stream APIs -- see `--model-path` flag)
 
 **Local (dashboard):**
 - Python 3.9+
@@ -100,7 +99,6 @@ Options:
 ```bash
 bash deploy.sh --cluster-id abc123    # reuse existing cluster
 bash deploy.sh --region us-west-2     # non-default region
-bash deploy.sh --model-path ./dsql-2018-05-10.normal.json
 ```
 
 ### Step 2: Verify deployment
