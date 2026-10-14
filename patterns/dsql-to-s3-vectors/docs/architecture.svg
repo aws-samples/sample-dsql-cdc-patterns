@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 160" font-family="'Amazon Ember', 'Helvetica Neue', Roboto, Arial, sans-serif">
+  <defs>
+    <linearGradient id="dsql" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3B48CC"/>
+      <stop offset="100%" stop-color="#2E27AD"/>
+    </linearGradient>
+    <linearGradient id="kinesis" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#8C4FFF"/>
+      <stop offset="100%" stop-color="#6B3BC2"/>
+    </linearGradient>
+    <linearGradient id="lambda" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ED7100"/>
+      <stop offset="100%" stop-color="#C25500"/>
+    </linearGradient>
+    <linearGradient id="bedrock" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#01A88D"/>
+      <stop offset="100%" stop-color="#00836E"/>
+    </linearGradient>
+    <linearGradient id="s3vec" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3F8624"/>
+      <stop offset="100%" stop-color="#2D6B19"/>
+    </linearGradient>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.15"/>
+    </filter>
+    <marker id="arrow" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <path d="M0,0 L7,2.5 L0,5" fill="#879196"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="720" height="160" rx="8" fill="#F2F3F3"/>
+
+  <!-- Header bar -->
+  <rect x="0" y="0" width="720" height="38" rx="8" fill="#232F3E"/>
+  <rect x="0" y="8" width="720" height="30" fill="#232F3E"/>
+  <rect x="0" y="38" width="720" height="3" fill="#FF9900"/>
+  <text x="360" y="26" text-anchor="middle" fill="#FFFFFF" font-size="13" font-weight="600" letter-spacing="0.5">DSQL CDC  &#x2192;  S3 Vector Buckets</text>
+
+  <!-- Aurora DSQL -->
+  <rect x="18" y="60" width="110" height="48" rx="8" fill="url(#dsql)" filter="url(#shadow)"/>
+  <rect x="24" y="66" width="4" height="36" rx="2" fill="#FF9900" opacity="0.7"/>
+  <text x="78" y="81" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">Aurora DSQL</text>
+  <text x="78" y="97" text-anchor="middle" fill="#C5CAE9" font-size="9">Source Database</text>
+
+  <!-- Arrow: DSQL → Kinesis -->
+  <line x1="128" y1="84" x2="160" y2="84" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="133" y="70" width="24" height="12" rx="3" fill="#FF9900"/>
+  <text x="145" y="79" text-anchor="middle" fill="#FFFFFF" font-size="7" font-weight="600">CDC</text>
+
+  <!-- Kinesis -->
+  <rect x="166" y="60" width="110" height="48" rx="8" fill="url(#kinesis)" filter="url(#shadow)"/>
+  <rect x="172" y="66" width="4" height="36" rx="2" fill="#FF9900" opacity="0.7"/>
+  <text x="226" y="81" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">Kinesis</text>
+  <text x="226" y="97" text-anchor="middle" fill="#D1C4E9" font-size="9">Data Stream</text>
+
+  <!-- Arrow: Kinesis → Lambda -->
+  <line x1="276" y1="84" x2="308" y2="84" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Lambda -->
+  <rect x="314" y="60" width="110" height="48" rx="8" fill="url(#lambda)" filter="url(#shadow)"/>
+  <text x="369" y="81" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">Lambda</text>
+  <text x="369" y="97" text-anchor="middle" fill="#FFE0B2" font-size="9">CDC Consumer</text>
+
+  <!-- Arrow: Lambda → Bedrock -->
+  <line x1="424" y1="84" x2="456" y2="84" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Bedrock (Titan V2) -->
+  <rect x="462" y="60" width="110" height="48" rx="8" fill="url(#bedrock)" filter="url(#shadow)"/>
+  <text x="517" y="81" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">Bedrock</text>
+  <text x="517" y="97" text-anchor="middle" fill="#B2DFDB" font-size="9">Titan Embed V2</text>
+
+  <!-- Arrow: Bedrock → S3 Vectors -->
+  <line x1="572" y1="84" x2="604" y2="84" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- S3 Vectors -->
+  <rect x="610" y="60" width="96" height="48" rx="8" fill="url(#s3vec)" filter="url(#shadow)"/>
+  <text x="658" y="81" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">S3 Vectors</text>
+  <text x="658" y="97" text-anchor="middle" fill="#C8E6C9" font-size="9">Vector Buckets</text>
+
+  <!-- Labels -->
+  <text x="78" y="126" text-anchor="middle" fill="#545B64" font-size="8" font-weight="500">Change Events</text>
+  <text x="517" y="126" text-anchor="middle" fill="#545B64" font-size="8" font-weight="500">Embeddings</text>
+  <text x="658" y="126" text-anchor="middle" fill="#545B64" font-size="8" font-weight="500">Semantic Search</text>
+</svg>

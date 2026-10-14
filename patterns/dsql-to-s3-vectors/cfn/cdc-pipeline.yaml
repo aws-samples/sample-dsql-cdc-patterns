@@ -1,0 +1,459 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  DSQL CDC to Amazon S3 Vectors.
+  Creates an S3 vector bucket and index, a Kinesis stream, a Lambda CDC
+  consumer (Bedrock Titan embeddings -> S3 Vectors), an SQS DLQ, and IAM
+  roles for the CDC pipeline.
+
+Parameters:
+  DsqlClusterId:
+    Type: String
+    Description: DSQL cluster identifier
+
+Resources:
+  # -------------------------------------------------------------------
+  # S3 vector bucket and index
+  # -------------------------------------------------------------------
+  VectorBucket:
+    Type: AWS::S3Vectors::VectorBucket
+    DeletionPolicy: Delete
+    Properties:
+      VectorBucketName: dsql-product-vectors
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  VectorIndex:
+    Type: AWS::S3Vectors::Index
+    DeletionPolicy: Delete
+    Properties:
+      VectorBucketArn: !GetAtt VectorBucket.VectorBucketArn
+      IndexName: products
+      DataType: float32
+      Dimension: 1024  # amazon.titan-embed-text-v2:0 with dimensions=1024
+      DistanceMetric: cosine
+      # Everything else (category, brand, price, in_stock) is filterable.
+      MetadataConfiguration:
+        NonFilterableMetadataKeys:
+          - name
+          - description
+          - tags
+          - created_at
+          - updated_at
+          - cdc_commit_ts_ns
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  # -------------------------------------------------------------------
+  # Kinesis data stream for CDC events
+  # -------------------------------------------------------------------
+  CdcKinesisStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      # One shard + ParallelizationFactor 1 keeps the consumer's
+      # read-compare-write ordering guard free of concurrent invocations.
+      ShardCount: 1
+      StreamEncryption:
+        EncryptionType: KMS
+        KeyId: alias/aws/kinesis
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  # -------------------------------------------------------------------
+  # IAM role: DSQL -> Kinesis (CDC writes)
+  # -------------------------------------------------------------------
+  CdcRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Allows DSQL to write CDC events to Kinesis
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: dsql.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:aws:dsql:*:${AWS::AccountId}:cluster/*"
+      Policies:
+        - PolicyName: WriteToKinesisStream
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteToKinesisStream
+                Effect: Allow
+                Action:
+                  - kinesis:PutRecord
+                  - kinesis:PutRecords
+                  - kinesis:DescribeStreamSummary
+                  - kinesis:ListShards
+                Resource: !GetAtt CdcKinesisStream.Arn
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  # -------------------------------------------------------------------
+  # SQS dead-letter queue for batches that exhaust their retries
+  # -------------------------------------------------------------------
+  ConsumerDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  # -------------------------------------------------------------------
+  # Lambda CDC consumer (Bedrock embeddings -> S3 Vectors)
+  # -------------------------------------------------------------------
+  ConsumerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      RetentionInDays: 30
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  ConsumerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Lambda execution role for CDC consumer with Bedrock and S3 Vectors
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      # Inline policies exist as soon as the role does, so the event source
+      # mapping can validate Kinesis and SQS access on create.
+      Policies:
+        - PolicyName: ConsumerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadFromKinesisStream
+                Effect: Allow
+                Action:
+                  - kinesis:DescribeStream
+                  - kinesis:DescribeStreamSummary
+                  - kinesis:GetRecords
+                  - kinesis:GetShardIterator
+                  - kinesis:ListShards
+                  - kinesis:SubscribeToShard
+                Resource: !GetAtt CdcKinesisStream.Arn
+              - Sid: ReadWriteVectorIndex
+                Effect: Allow
+                Action:
+                  - s3vectors:PutVectors
+                  - s3vectors:DeleteVectors
+                  - s3vectors:GetVectors
+                Resource: !GetAtt VectorIndex.IndexArn
+              - Sid: InvokeEmbeddingModel
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0"
+              - Sid: SendToDeadLetterQueue
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt ConsumerDLQ.Arn
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  ConsumerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Processes DSQL CDC events, generates Bedrock embeddings, stores them in S3 Vectors
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 300
+      MemorySize: 512
+      Role: !GetAtt ConsumerRole.Arn
+      LoggingConfig:
+        LogGroup: !Ref ConsumerLogGroup
+      Environment:
+        Variables:
+          VECTOR_BUCKET_NAME: dsql-product-vectors
+          INDEX_NAME: products
+          EMBEDDING_MODEL_ID: amazon.titan-embed-text-v2:0
+      Code:
+        ZipFile: |
+          # Readable copy with full format notes: lambda/consumer.py
+          # DSQL CDC: after = full row (c/u), before = PK only (d); commit times
+          # under source; timestamptz = epoch microseconds; numeric = string.
+          import base64
+          import datetime
+          import json
+          import math
+          import os
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+
+          import boto3
+
+          VECTOR_BUCKET_NAME = os.environ["VECTOR_BUCKET_NAME"]
+          INDEX_NAME = os.environ.get("INDEX_NAME", "products")
+          EMBEDDING_MODEL_ID = os.environ.get("EMBEDDING_MODEL_ID", "amazon.titan-embed-text-v2:0")
+          EMBEDDING_DIMENSIONS = 1024
+          EMBEDDING_CONCURRENCY = 10
+          SOURCE_TABLE = "products"
+
+          s3v = boto3.client("s3vectors")
+          bedrock = boto3.client("bedrock-runtime")
+
+          # DSQL sentinel microsecond values for +/-infinity timestamps. These do not map
+          # to meaningful calendar dates, so we emit null rather than a bogus timestamp.
+          _TS_POS_INF = 9223372036825200000
+          _TS_NEG_INF = -9223372036832400000
+
+
+          def _to_iso_timestamp(value):
+              """Convert a DSQL timestamptz (microseconds since epoch) to an ISO-8601 UTC
+              string. Pass through values that are already strings or null."""
+              if isinstance(value, bool) or not isinstance(value, (int, float)):
+                  return value  # already a string, or None
+              if value in (_TS_POS_INF, _TS_NEG_INF):
+                  return None
+              try:
+                  return datetime.datetime.fromtimestamp(
+                      value / 1_000_000, tz=datetime.timezone.utc
+                  ).isoformat()
+              except (OverflowError, OSError, ValueError):
+                  return None
+
+
+          def _to_float(value):
+              """Parse a DSQL numeric (a JSON string such as "29.99"). Returns None for
+              null and for "NaN"/"Infinity"/"-Infinity"."""
+              try:
+                  f = float(value)
+              except (TypeError, ValueError):
+                  return None
+              return f if math.isfinite(f) else None
+
+
+          def build_embedding_text(row):
+              parts = [row.get("name") or "", row.get("description") or "",
+                       f"Category: {row.get('category') or ''}",
+                       f"Brand: {row.get('brand') or ''}"]
+              tags = row.get("tags")
+              if tags:
+                  parts.append(f"Tags: {tags}")
+              return ". ".join(parts) + "."
+
+
+          def generate_embedding(text):
+              resp = bedrock.invoke_model(
+                  modelId=EMBEDDING_MODEL_ID,
+                  contentType="application/json",
+                  accept="application/json",
+                  body=json.dumps({"inputText": text, "dimensions": EMBEDDING_DIMENSIONS, "normalize": True}),
+              )
+              return json.loads(resp["body"].read())["embedding"]
+
+
+          def extract_metadata(row, commit_ts_ns):
+              meta = {
+                  # Filterable keys (usable in QueryVectors filters)
+                  "category": row.get("category"),
+                  "brand": row.get("brand"),
+                  "price": _to_float(row.get("price")),
+                  "in_stock": bool(row.get("in_stock")),
+                  # Non-filterable keys (see MetadataConfiguration in the template)
+                  "name": row.get("name"),
+                  "description": row.get("description"),
+                  "tags": row.get("tags"),
+                  "created_at": _to_iso_timestamp(row.get("created_at")),
+                  "updated_at": _to_iso_timestamp(row.get("updated_at")),
+                  # String, because nanosecond epochs exceed float64 integer precision.
+                  "cdc_commit_ts_ns": str(commit_ts_ns),
+              }
+              # S3 Vectors metadata values cannot be null.
+              return {k: v for k, v in meta.items() if v is not None}
+
+
+          def stored_commit_ts(keys):
+              """Return {key: commit ts_ns} for the keys that already have a vector."""
+              stored = {}
+              for i in range(0, len(keys), 100):  # GetVectors accepts up to 100 keys
+                  resp = s3v.get_vectors(
+                      vectorBucketName=VECTOR_BUCKET_NAME,
+                      indexName=INDEX_NAME,
+                      keys=keys[i:i + 100],
+                      returnMetadata=True,
+                  )
+                  for v in resp.get("vectors", []):
+                      stored[v["key"]] = int((v.get("metadata") or {}).get("cdc_commit_ts_ns") or 0)
+              return stored
+
+
+          def handler(event, context):
+              records = event.get("Records", [])
+              failed_seqs = []
+              latest = {}  # product id -> newest event in this batch
+
+              for record in records:
+                  seq = record["kinesis"]["sequenceNumber"]
+                  try:
+                      cdc = json.loads(base64.b64decode(record["kinesis"]["data"]))
+
+                      # Chunked main records and fragments need stateful reassembly.
+                      if cdc.get("type", "full") != "full":
+                          print(f"Skipping {cdc.get('type')} record {seq} (oversized row; not supported)")
+                          continue
+
+                      source = cdc.get("source") or {}
+                      if source.get("table") != SOURCE_TABLE:
+                          continue
+
+                      op = cdc.get("op")
+                      # after = full row for c/u; before = PK-only for d.
+                      row = cdc.get("before") if op == "d" else cdc.get("after")
+                      if op not in ("c", "u", "d") or not row or not row.get("id"):
+                          print(f"Skipping record {seq}: op={op!r} without a row id")
+                          continue
+
+                      key = str(row["id"])
+                      ts_ns = int(source.get("ts_ns") or 0)
+                      prev = latest.get(key)
+                      if prev is None or ts_ns > prev["ts_ns"]:
+                          latest[key] = {"op": op, "row": row, "ts_ns": ts_ns, "seq": seq}
+                  except Exception as e:
+                      print(f"Failed to parse record {seq}: {e}")
+                      failed_seqs.append(seq)
+
+              if not latest:
+                  return {"batchItemFailures": [{"itemIdentifier": s} for s in failed_seqs]}
+
+              try:
+                  stored = stored_commit_ts(list(latest))
+              except Exception as e:
+                  # Without the stored versions we cannot order writes; retry the batch.
+                  print(f"GetVectors failed, retrying batch: {e}")
+                  return {"batchItemFailures": [{"itemIdentifier": r["kinesis"]["sequenceNumber"]} for r in records]}
+
+              pending_puts, deletes, stale = [], [], 0
+              for key, ev in latest.items():
+                  current = stored.get(key)
+                  if ev["op"] == "d":
+                      if current is None:
+                          continue  # nothing to delete
+                      if current < ev["ts_ns"]:
+                          deletes.append((key, ev["seq"]))
+                      else:
+                          stale += 1
+                  elif current is None or current < ev["ts_ns"]:
+                      pending_puts.append((key, ev))
+                  else:
+                      stale += 1
+
+              # Generate embeddings with concurrency
+              put_vectors = []
+              if pending_puts:
+                  def embed_item(key, ev):
+                      return {
+                          "key": key,
+                          "data": {"float32": generate_embedding(build_embedding_text(ev["row"]))},
+                          "metadata": extract_metadata(ev["row"], ev["ts_ns"]),
+                          "seq": ev["seq"],
+                      }
+
+                  with ThreadPoolExecutor(max_workers=EMBEDDING_CONCURRENCY) as pool:
+                      futures = {pool.submit(embed_item, key, ev): (key, ev) for key, ev in pending_puts}
+                      for future in as_completed(futures):
+                          key, ev = futures[future]
+                          try:
+                              put_vectors.append(future.result())
+                          except Exception as e:
+                              print(f"Embedding failed for {key}: {e}")
+                              failed_seqs.append(ev["seq"])
+
+              # Batch PutVectors (up to 500 per call)
+              for i in range(0, len(put_vectors), 500):
+                  batch = put_vectors[i:i + 500]
+                  try:
+                      s3v.put_vectors(
+                          vectorBucketName=VECTOR_BUCKET_NAME,
+                          indexName=INDEX_NAME,
+                          vectors=[{k: v[k] for k in ("key", "data", "metadata")} for v in batch],
+                      )
+                  except Exception as e:
+                      print(f"PutVectors failed: {e}")
+                      failed_seqs.extend(v["seq"] for v in batch)
+
+              # Batch DeleteVectors (up to 500 per call)
+              for i in range(0, len(deletes), 500):
+                  batch = deletes[i:i + 500]
+                  try:
+                      s3v.delete_vectors(
+                          vectorBucketName=VECTOR_BUCKET_NAME,
+                          indexName=INDEX_NAME,
+                          keys=[key for key, _ in batch],
+                      )
+                  except Exception as e:
+                      print(f"DeleteVectors failed: {e}")
+                      failed_seqs.extend(seq for _, seq in batch)
+
+              print(f"Processed {len(records)} records: {len(put_vectors)} puts, "
+                    f"{len(deletes)} deletes, {stale} stale skipped, {len(failed_seqs)} failed")
+              return {"batchItemFailures": [{"itemIdentifier": s} for s in failed_seqs]}
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  # -------------------------------------------------------------------
+  # Kinesis -> Lambda event source mapping
+  # -------------------------------------------------------------------
+  ConsumerEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt CdcKinesisStream.Arn
+      FunctionName: !Ref ConsumerFunction
+      StartingPosition: TRIM_HORIZON
+      BatchSize: 100
+      ParallelizationFactor: 1
+      BisectBatchOnFunctionError: false
+      MaximumRetryAttempts: 3
+      MaximumRecordAgeInSeconds: 86400
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt ConsumerDLQ.Arn
+
+Outputs:
+  VectorBucketName:
+    Value: dsql-product-vectors
+    Description: S3 vector bucket name
+  VectorIndexName:
+    Value: products
+    Description: S3 vector index name
+  VectorIndexArn:
+    Value: !GetAtt VectorIndex.IndexArn
+    Description: ARN of the S3 vector index
+  KinesisStreamArn:
+    Value: !GetAtt CdcKinesisStream.Arn
+    Description: ARN of the Kinesis Data Stream for CDC events
+  CdcRoleArn:
+    Value: !GetAtt CdcRole.Arn
+    Description: ARN of the IAM role used by DSQL to write CDC events
+  DsqlClusterHost:
+    Value: !Sub "${DsqlClusterId}.dsql.${AWS::Region}.on.aws"
+    Description: DSQL cluster hostname for client connections
+  DsqlClusterId:
+    Value: !Ref DsqlClusterId
+    Description: DSQL cluster identifier
+  ConsumerDLQArn:
+    Value: !GetAtt ConsumerDLQ.Arn
+    Description: SQS dead-letter queue ARN for CDC batches that exhaust their retries
