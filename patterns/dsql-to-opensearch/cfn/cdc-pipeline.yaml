@@ -1,0 +1,877 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  DSQL CDC to OpenSearch Serverless.
+  Creates a VPC with isolated subnets, OpenSearch Serverless collection,
+  Kinesis stream, Lambda CDC consumer, Lambda search proxy, API Gateway,
+  IAM roles, SQS DLQ, and CloudWatch log groups.
+
+Parameters:
+  DsqlClusterId:
+    Type: String
+    Description: DSQL cluster identifier
+
+Resources:
+  # -------------------------------------------------------------------
+  # 1. VPC with isolated subnets (no NAT, no IGW)
+  # -------------------------------------------------------------------
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: dsql-cdc-opensearch-vpc
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  IsolatedSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: dsql-cdc-opensearch-isolated-a
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  IsolatedSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: dsql-cdc-opensearch-isolated-b
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  IsolatedRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: dsql-cdc-opensearch-isolated-rt
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  IsolatedSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref IsolatedSubnetA
+      RouteTableId: !Ref IsolatedRouteTable
+
+  IsolatedSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref IsolatedSubnetB
+      RouteTableId: !Ref IsolatedRouteTable
+
+  # -------------------------------------------------------------------
+  # 2. Security Group
+  # -------------------------------------------------------------------
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda and OpenSearch communication
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  # Allow all traffic within the security group (self-referencing)
+  SgIngressSelf:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref LambdaSecurityGroup
+      IpProtocol: '-1'
+      SourceSecurityGroupId: !Ref LambdaSecurityGroup
+      Description: Allow all traffic within the security group
+
+  # Allow HTTPS outbound to the in-VPC endpoints (no NAT or IGW exists)
+  SgEgressHttps:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref LambdaSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: !GetAtt Vpc.CidrBlock
+      Description: Allow HTTPS to VPC endpoints
+
+  # -------------------------------------------------------------------
+  # 3. VPC Endpoints (AOSS and STS)
+  # -------------------------------------------------------------------
+  AossVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.aoss
+      VpcEndpointType: Interface
+      SubnetIds:
+        - !Ref IsolatedSubnetA
+        - !Ref IsolatedSubnetB
+      SecurityGroupIds:
+        - !Ref LambdaSecurityGroup
+      PrivateDnsEnabled: true
+
+  StsVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.sts
+      VpcEndpointType: Interface
+      SubnetIds:
+        - !Ref IsolatedSubnetA
+        - !Ref IsolatedSubnetB
+      SecurityGroupIds:
+        - !Ref LambdaSecurityGroup
+      PrivateDnsEnabled: true
+
+  # -------------------------------------------------------------------
+  # 4. OpenSearch Serverless
+  # -------------------------------------------------------------------
+
+  # Encryption policy (required before collection creation)
+  EncryptionPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: dsql-product-search-enc
+      Type: encryption
+      Policy: >-
+        {"Rules":[{"ResourceType":"collection","Resource":["collection/dsql-product-search"]}],"AWSOwnedKey":true}
+
+  # OpenSearch Serverless VPC Endpoint
+  OssVpcEndpoint:
+    Type: AWS::OpenSearchServerless::VpcEndpoint
+    Properties:
+      Name: dsql-opensearch-vpce
+      VpcId: !Ref Vpc
+      SubnetIds:
+        - !Ref IsolatedSubnetA
+        - !Ref IsolatedSubnetB
+      SecurityGroupIds:
+        - !Ref LambdaSecurityGroup
+
+  # Network policy (VPC-only access, no public)
+  NetworkPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: dsql-product-search-net
+      Type: network
+      Policy: !Sub
+        - >-
+          [{"Rules":[{"ResourceType":"collection","Resource":["collection/dsql-product-search"]},{"ResourceType":"dashboard","Resource":["collection/dsql-product-search"]}],"AllowFromPublic":false,"SourceVPCEs":["${VpceId}"]}]
+        - VpceId: !Ref OssVpcEndpoint
+
+  # OpenSearch Serverless Collection
+  Collection:
+    Type: AWS::OpenSearchServerless::Collection
+    DependsOn:
+      - EncryptionPolicy
+      - NetworkPolicy
+    Properties:
+      Name: dsql-product-search
+      Type: SEARCH
+      Description: Product search index synced from DSQL via CDC
+
+  # -------------------------------------------------------------------
+  # 5. Kinesis Data Stream
+  # -------------------------------------------------------------------
+  CdcKinesisStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: dsql-cdc-opensearch-stream
+      ShardCount: 1
+      StreamEncryption:
+        EncryptionType: KMS
+        KeyId: alias/aws/kinesis
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  # -------------------------------------------------------------------
+  # 6. CDC IAM Role (DSQL -> Kinesis)
+  # -------------------------------------------------------------------
+  CdcRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Allows DSQL to write CDC events to Kinesis
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: dsql.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:aws:dsql:*:${AWS::AccountId}:cluster/*"
+      Policies:
+        - PolicyName: WriteToKinesisStream
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kinesis:PutRecord
+                  - kinesis:PutRecords
+                  - kinesis:DescribeStreamSummary
+                  - kinesis:ListShards
+                Resource: !GetAtt CdcKinesisStream.Arn
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  # -------------------------------------------------------------------
+  # 7. Lambda — CDC Consumer
+  # -------------------------------------------------------------------
+  ConsumerFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Lambda execution role for CDC consumer
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: ReadFromKinesis
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kinesis:DescribeStream
+                  - kinesis:DescribeStreamSummary
+                  - kinesis:GetRecords
+                  - kinesis:GetShardIterator
+                  - kinesis:ListShards
+                  - kinesis:SubscribeToShard
+                Resource: !GetAtt CdcKinesisStream.Arn
+        - PolicyName: WriteToOpenSearch
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # IAM grants data-plane access; DataAccessPolicy scopes it per index.
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource: !GetAtt Collection.Arn
+        - PolicyName: WriteToDLQ
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt ConsumerDLQ.Arn
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  ConsumerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ConsumerLogGroup
+    Properties:
+      FunctionName: dsql-cdc-opensearch-consumer
+      Description: Processes Kinesis CDC records and syncs to OpenSearch Serverless
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 120
+      MemorySize: 512
+      Role: !GetAtt ConsumerFunctionRole.Arn
+      VpcConfig:
+        SubnetIds:
+          - !Ref IsolatedSubnetA
+          - !Ref IsolatedSubnetB
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+      Environment:
+        Variables:
+          COLLECTION_ENDPOINT: !GetAtt Collection.CollectionEndpoint
+          INDEX_NAME: products
+      Code:
+        ZipFile: |
+          import base64,json,os,urllib.request,urllib.error,datetime
+
+          ENDPOINT=os.environ['COLLECTION_ENDPOINT']
+          INDEX=os.environ.get('INDEX_NAME','products')
+          REGION=os.environ.get('AWS_REGION','us-east-1')
+          SERVICE='aoss'
+
+          INDEX_SETTINGS=json.dumps({
+            "settings":{"analysis":{"analyzer":{"autocomplete_analyzer":{"type":"custom","tokenizer":"autocomplete_tokenizer","filter":["lowercase"]},"autocomplete_search_analyzer":{"type":"custom","tokenizer":"standard","filter":["lowercase"]}},"tokenizer":{"autocomplete_tokenizer":{"type":"edge_ngram","min_gram":2,"max_gram":20,"token_chars":["letter","digit"]}}}},
+            "mappings":{"properties":{"name":{"type":"text","fields":{"autocomplete":{"type":"text","analyzer":"autocomplete_analyzer","search_analyzer":"autocomplete_search_analyzer"}}},"description":{"type":"text"},"category":{"type":"text","fields":{"keyword":{"type":"keyword"}}},"brand":{"type":"text","fields":{"keyword":{"type":"keyword"}}},"price":{"type":"float"},"in_stock":{"type":"boolean"},"tags":{"type":"text","fields":{"keyword":{"type":"keyword"}}},"created_at":{"type":"date"},"updated_at":{"type":"date"},"cdc_commit_ts_ns":{"type":"long"}}}
+          })
+
+          # DSQL sentinel microsecond values for +/-infinity timestamps.
+          _TS_INF=(9223372036825200000,-9223372036832400000)
+
+          _index_ok=False
+
+          def _ts(v):
+              # DSQL timestamptz (microseconds since epoch) -> ISO-8601 UTC string.
+              if isinstance(v,bool) or not isinstance(v,(int,float)):
+                  return v
+              if v in _TS_INF:
+                  return None
+              try:
+                  return datetime.datetime.fromtimestamp(v/1000000,tz=datetime.timezone.utc).isoformat()
+              except (OverflowError,OSError,ValueError):
+                  return None
+
+          def _sign(method,url,body,headers):
+              from botocore.auth import SigV4Auth
+              from botocore.awsrequest import AWSRequest
+              from botocore.session import Session as BotoSession
+              creds=BotoSession().get_credentials().get_frozen_credentials()
+              req=AWSRequest(method=method,url=url,data=body,headers=headers)
+              SigV4Auth(creds,SERVICE,REGION).add_auth(req)
+              return dict(req.headers)
+
+          def _req(method,path,body=None):
+              url=f"{ENDPOINT}/{path}"
+              data=body.encode() if body else b''
+              hdrs=_sign(method,url,data,{'Content-Type':'application/json'})
+              r=urllib.request.Request(url,data=data if body else None,headers=hdrs,method=method)
+              try:
+                  with urllib.request.urlopen(r) as resp:
+                      raw=resp.read()
+                      # HEAD responses have no body.
+                      return json.loads(raw) if raw else {}
+              except urllib.error.HTTPError as e:
+                  print(f"HTTP {e.code}: {e.read().decode()}")
+                  raise
+
+          def ensure_index():
+              global _index_ok
+              if _index_ok:
+                  return
+              try:
+                  _req('HEAD',INDEX)
+              except urllib.error.HTTPError as e:
+                  if e.code!=404:
+                      raise
+                  print(f'Creating index {INDEX}')
+                  _req('PUT',INDEX,INDEX_SETTINGS)
+              _index_ok=True
+
+          def handler(event,context):
+              failed=[]
+              ensure_index()
+              latest={}  # id -> (commit ts_ns, sequence number, bulk lines)
+              for rec in event.get('Records',[]):
+                  seq=rec['kinesis']['sequenceNumber']
+                  try:
+                      payload=json.loads(base64.b64decode(rec['kinesis']['data']))
+                      if payload.get('type','full')!='full':
+                          print(f"Unsupported CDC record type {payload.get('type')!r} at {seq}")
+                          failed.append(seq)
+                          continue
+                      src=payload.get('source',{})
+                      if src.get('table')!='products':
+                          continue
+                      op=payload.get('op')
+                      # after = full row for c/u; before = PK-only for d.
+                      row=payload.get('before') if op=='d' else payload.get('after')
+                      if not row or not row.get('id'):
+                          continue
+                      pid=row['id']
+                      ts_ns=src.get('ts_ns') or 0
+                      prev=latest.get(pid)
+                      if prev and prev[0]>ts_ns:
+                          continue  # an event with a later commit is already in this batch
+                      if op=='d':
+                          lines=[json.dumps({"delete":{"_index":INDEX,"_id":pid}})]
+                      else:
+                          doc={
+                              'name':row.get('name'),
+                              'description':row.get('description'),
+                              'category':row.get('category'),
+                              'brand':row.get('brand'),
+                              'price':float(row.get('price') or 0),
+                              'in_stock':row.get('in_stock') in (True,'t','true'),
+                              'tags':row.get('tags') or '',
+                              'created_at':_ts(row.get('created_at')),
+                              'updated_at':_ts(row.get('updated_at')),
+                              'cdc_commit_ts_ns':ts_ns,
+                          }
+                          lines=[json.dumps({"index":{"_index":INDEX,"_id":pid}}),json.dumps(doc)]
+                      latest[pid]=(ts_ns,seq,lines)
+                  except Exception as ex:
+                      print(f"Record error {seq}: {ex}")
+                      failed.append(seq)
+              ops=list(latest.values())
+              if ops:
+                  body='\n'.join(l for o in ops for l in o[2])+'\n'
+                  try:
+                      result=_req('POST','_bulk',body)
+                      if result.get('errors'):
+                          for i,item in enumerate(result.get('items',[])):
+                              act=item.get('index') or item.get('delete') or {}
+                              if act.get('error'):
+                                  print(f"Bulk error: {json.dumps(act['error'])}")
+                                  if i<len(ops):
+                                      failed.append(ops[i][1])
+                      print(f"Processed {len(result.get('items',[]))} ops (errors={result.get('errors')})")
+                  except Exception as ex:
+                      print(f"Bulk failed: {ex}")
+                      failed.extend(rec['kinesis']['sequenceNumber'] for rec in event.get('Records',[]))
+              return {'batchItemFailures':[{'itemIdentifier':fid} for fid in dict.fromkeys(failed)]}
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  ConsumerDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  ConsumerEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      FunctionName: !Ref ConsumerFunction
+      EventSourceArn: !GetAtt CdcKinesisStream.Arn
+      StartingPosition: TRIM_HORIZON
+      BatchSize: 100
+      ParallelizationFactor: 1
+      BisectBatchOnFunctionError: true
+      MaximumRetryAttempts: 3
+      MaximumRecordAgeInSeconds: 86400
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt ConsumerDLQ.Arn
+
+  # -------------------------------------------------------------------
+  # 8. Lambda — Search Proxy
+  # -------------------------------------------------------------------
+  SearchProxyFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Lambda execution role for search proxy
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: QueryOpenSearch
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # IAM grants data-plane access; DataAccessPolicy scopes it per index.
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource: !GetAtt Collection.Arn
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  SearchProxyFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: SearchProxyLogGroup
+    Properties:
+      FunctionName: dsql-cdc-opensearch-search-proxy
+      Description: Routes API Gateway requests to OpenSearch Serverless queries
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 512
+      Role: !GetAtt SearchProxyFunctionRole.Arn
+      VpcConfig:
+        SubnetIds:
+          - !Ref IsolatedSubnetA
+          - !Ref IsolatedSubnetB
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+      Environment:
+        Variables:
+          COLLECTION_ENDPOINT: !GetAtt Collection.CollectionEndpoint
+          INDEX_NAME: products
+      Code:
+        ZipFile: |
+          import json,os,re,urllib.request,urllib.error
+
+          ENDPOINT=os.environ['COLLECTION_ENDPOINT']
+          INDEX=os.environ.get('INDEX_NAME','products')
+          REGION=os.environ.get('AWS_REGION','us-east-1')
+          SERVICE='aoss'
+
+          # Must match INDEX_SETTINGS in the CDC consumer.
+          INDEX_SETTINGS=json.dumps({
+            "settings":{"analysis":{"analyzer":{"autocomplete_analyzer":{"type":"custom","tokenizer":"autocomplete_tokenizer","filter":["lowercase"]},"autocomplete_search_analyzer":{"type":"custom","tokenizer":"standard","filter":["lowercase"]}},"tokenizer":{"autocomplete_tokenizer":{"type":"edge_ngram","min_gram":2,"max_gram":20,"token_chars":["letter","digit"]}}}},
+            "mappings":{"properties":{"name":{"type":"text","fields":{"autocomplete":{"type":"text","analyzer":"autocomplete_analyzer","search_analyzer":"autocomplete_search_analyzer"}}},"description":{"type":"text"},"category":{"type":"text","fields":{"keyword":{"type":"keyword"}}},"brand":{"type":"text","fields":{"keyword":{"type":"keyword"}}},"price":{"type":"float"},"in_stock":{"type":"boolean"},"tags":{"type":"text","fields":{"keyword":{"type":"keyword"}}},"created_at":{"type":"date"},"updated_at":{"type":"date"},"cdc_commit_ts_ns":{"type":"long"}}}
+          })
+
+          _UUID=re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+
+          def _sign(method,url,body,headers):
+              from botocore.auth import SigV4Auth
+              from botocore.awsrequest import AWSRequest
+              from botocore.session import Session as BotoSession
+              creds=BotoSession().get_credentials().get_frozen_credentials()
+              req=AWSRequest(method=method,url=url,data=body,headers=headers)
+              SigV4Auth(creds,SERVICE,REGION).add_auth(req)
+              return dict(req.headers)
+
+          def _req(method,path,body=None):
+              url=f"{ENDPOINT}/{path}"
+              data=body.encode() if body else b''
+              hdrs=_sign(method,url,data,{'Content-Type':'application/json'})
+              r=urllib.request.Request(url,data=data if body else None,headers=hdrs,method=method)
+              try:
+                  with urllib.request.urlopen(r) as resp:
+                      raw=resp.read()
+                      return json.loads(raw) if raw else {}
+              except urllib.error.HTTPError as e:
+                  raise Exception(f"HTTP {e.code}: {e.read().decode()}")
+
+          def resp(code,body):
+              return {'statusCode':code,'headers':{'Content-Type':'application/json'},'body':json.dumps(body)}
+
+          def handle_search(event):
+              p=event.get('queryStringParameters') or {}
+              q=p.get('q');cat=p.get('category');br=p.get('brand')
+              pmin=p.get('price_min');pmax=p.get('price_max');ins=p.get('in_stock')
+              fr=int(p.get('from','0'));sz=int(p.get('size','20'))
+              must=[];filt=[]
+              if q:
+                  must.append({'multi_match':{'query':q,'fields':['name^3','description','tags','category','brand'],'fuzziness':'AUTO'}})
+              else:
+                  must.append({'match_all':{}})
+              if cat:filt.append({'term':{'category.keyword':cat}})
+              if br:filt.append({'term':{'brand.keyword':br}})
+              if pmin or pmax:
+                  rng={}
+                  if pmin:rng['gte']=float(pmin)
+                  if pmax:rng['lte']=float(pmax)
+                  filt.append({'range':{'price':rng}})
+              if ins is not None:filt.append({'term':{'in_stock':ins=='true'}})
+              body={'query':{'bool':{'must':must,'filter':filt}},'from':fr,'size':sz,'highlight':{'fields':{'name':{},'description':{}},'pre_tags':['<em>'],'post_tags':['</em>']}}
+              result=_req('POST',f'{INDEX}/_search',json.dumps(body))
+              hits=[{'id':h['_id'],**h['_source'],'_score':h['_score'],'highlight':h.get('highlight')} for h in result['hits']['hits']]
+              return resp(200,{'hits':hits,'total':result['hits'].get('total',{}).get('value',0),'took':result.get('took')})
+
+          def handle_autocomplete(event):
+              p=event.get('queryStringParameters') or {}
+              q=p.get('q');sz=int(p.get('size','8'))
+              if not q:return resp(200,{'suggestions':[]})
+              result=_req('POST',f'{INDEX}/_search',json.dumps({'query':{'match':{'name.autocomplete':q}},'size':sz,'_source':['name','category']}))
+              sugs=[{'id':h['_id'],'name':h['_source']['name'],'category':h['_source']['category']} for h in result['hits']['hits']]
+              return resp(200,{'suggestions':sugs})
+
+          def handle_facets():
+              body={'size':0,'aggs':{'categories':{'terms':{'field':'category.keyword','size':20}},'brands':{'terms':{'field':'brand.keyword','size':20}},'price_ranges':{'range':{'field':'price','ranges':[{'key':'$0-25','from':0,'to':25},{'key':'$25-50','from':25,'to':50},{'key':'$50-100','from':50,'to':100},{'key':'$100-250','from':100,'to':250},{'key':'$250-500','from':250,'to':500},{'key':'$500+','from':500}]}},'in_stock_count':{'terms':{'field':'in_stock'}}}}
+              result=_req('POST',f'{INDEX}/_search',json.dumps(body))
+              aggs=result.get('aggregations',{})
+              return resp(200,{'categories':aggs.get('categories',{}).get('buckets',[]),'brands':aggs.get('brands',{}).get('buckets',[]),'price_ranges':aggs.get('price_ranges',{}).get('buckets',[]),'in_stock_count':aggs.get('in_stock_count',{}).get('buckets',[])})
+
+          def handle_stats():
+              try:
+                  result=_req('POST',f'{INDEX}/_count',json.dumps({'query':{'match_all':{}}}))
+                  return resp(200,{'doc_count':result.get('count',0),'index_info':None})
+              except Exception as e:
+                  if '404' in str(e):return resp(200,{'doc_count':0,'index_info':None})
+                  raise
+
+          def handle_list_products(event):
+              p=event.get('queryStringParameters') or {}
+              fr=int(p.get('from','0'));sz=int(p.get('size','50'))
+              result=_req('POST',f'{INDEX}/_search',json.dumps({'query':{'match_all':{}},'sort':[{'created_at':{'order':'desc'}}],'from':fr,'size':sz}))
+              prods=[{'id':h['_id'],**h['_source']} for h in result['hits']['hits']]
+              return resp(200,{'products':prods,'total':result['hits'].get('total',{}).get('value',0)})
+
+          def handle_get_product(pid):
+              # Product ids are DSQL UUIDs; reject anything else so it can't alter the URL path.
+              if not _UUID.match(pid):return resp(400,{'error':'Invalid product id'})
+              try:
+                  result=_req('GET',f'{INDEX}/_doc/{pid}')
+                  return resp(200,{'id':result['_id'],**result['_source']})
+              except Exception as e:
+                  if '404' in str(e):return resp(404,{'error':'Product not found'})
+                  raise
+
+          def handle_delete_index():
+              try:
+                  _req('DELETE',INDEX)
+              except Exception as e:
+                  if '404' not in str(e):raise
+              _req('PUT',INDEX,INDEX_SETTINGS)
+              return resp(200,{'message':'Index deleted and recreated'})
+
+          def handler(event,context):
+              path=event.get('path','')
+              method=event.get('httpMethod','GET')
+              print(f"{method} {path}")
+              try:
+                  if method=='GET' and path=='/search':return handle_search(event)
+                  if method=='GET' and path=='/autocomplete':return handle_autocomplete(event)
+                  if method=='GET' and path=='/facets':return handle_facets()
+                  if method=='GET' and path=='/stats':return handle_stats()
+                  if method=='GET' and path=='/products':return handle_list_products(event)
+                  if method=='GET' and path.startswith('/products/'):
+                      return handle_get_product(path.split('/products/',1)[1])
+                  if method=='DELETE' and path=='/index':return handle_delete_index()
+                  return resp(404,{'error':f'Not found: {method} {path}'})
+              except Exception as e:
+                  print(f"Handler error: {e}")
+                  return resp(500,{'error':'Internal server error'})
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  # -------------------------------------------------------------------
+  # Data Access Policy (needs Lambda role ARNs)
+  # -------------------------------------------------------------------
+  DataAccessPolicy:
+    Type: AWS::OpenSearchServerless::AccessPolicy
+    Properties:
+      Name: dsql-product-search-access
+      Type: data
+      Policy: !Sub
+        - >-
+          [{"Description":"CDC consumer: create and write the products index","Rules":[{"ResourceType":"index","Resource":["index/dsql-product-search/products"],"Permission":["aoss:CreateIndex","aoss:DescribeIndex","aoss:WriteDocument"]}],"Principal":["${ConsumerRoleArn}"]},{"Description":"Search proxy: query and reset the products index","Rules":[{"ResourceType":"index","Resource":["index/dsql-product-search/products"],"Permission":["aoss:CreateIndex","aoss:DeleteIndex","aoss:DescribeIndex","aoss:ReadDocument"]}],"Principal":["${SearchProxyRoleArn}"]}]
+        - ConsumerRoleArn: !GetAtt ConsumerFunctionRole.Arn
+          SearchProxyRoleArn: !GetAtt SearchProxyFunctionRole.Arn
+
+  # -------------------------------------------------------------------
+  # 9. API Gateway (REST API with IAM auth)
+  # -------------------------------------------------------------------
+  SearchApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: dsql-opensearch-search-api
+      Description: Search API for DSQL CDC to OpenSearch
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  SearchResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref SearchApi
+      ParentId: !GetAtt SearchApi.RootResourceId
+      PathPart: search
+
+  SearchMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SearchApi
+      ResourceId: !Ref SearchResource
+      HttpMethod: GET
+      AuthorizationType: AWS_IAM
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SearchProxyFunction.Arn}/invocations
+
+  AutocompleteResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref SearchApi
+      ParentId: !GetAtt SearchApi.RootResourceId
+      PathPart: autocomplete
+
+  AutocompleteMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SearchApi
+      ResourceId: !Ref AutocompleteResource
+      HttpMethod: GET
+      AuthorizationType: AWS_IAM
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SearchProxyFunction.Arn}/invocations
+
+  FacetsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref SearchApi
+      ParentId: !GetAtt SearchApi.RootResourceId
+      PathPart: facets
+
+  FacetsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SearchApi
+      ResourceId: !Ref FacetsResource
+      HttpMethod: GET
+      AuthorizationType: AWS_IAM
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SearchProxyFunction.Arn}/invocations
+
+  StatsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref SearchApi
+      ParentId: !GetAtt SearchApi.RootResourceId
+      PathPart: stats
+
+  StatsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SearchApi
+      ResourceId: !Ref StatsResource
+      HttpMethod: GET
+      AuthorizationType: AWS_IAM
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SearchProxyFunction.Arn}/invocations
+
+  ProductsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref SearchApi
+      ParentId: !GetAtt SearchApi.RootResourceId
+      PathPart: products
+
+  ProductsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SearchApi
+      ResourceId: !Ref ProductsResource
+      HttpMethod: GET
+      AuthorizationType: AWS_IAM
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SearchProxyFunction.Arn}/invocations
+
+  ProductByIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref SearchApi
+      ParentId: !Ref ProductsResource
+      PathPart: "{id}"
+
+  ProductByIdMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SearchApi
+      ResourceId: !Ref ProductByIdResource
+      HttpMethod: GET
+      AuthorizationType: AWS_IAM
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SearchProxyFunction.Arn}/invocations
+
+  IndexResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref SearchApi
+      ParentId: !GetAtt SearchApi.RootResourceId
+      PathPart: index
+
+  IndexDeleteMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SearchApi
+      ResourceId: !Ref IndexResource
+      HttpMethod: DELETE
+      AuthorizationType: AWS_IAM
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SearchProxyFunction.Arn}/invocations
+
+  # Lambda permissions for API Gateway
+  SearchProxyApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SearchProxyFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${SearchApi}/*
+
+  # API Gateway Deployment
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - SearchMethod
+      - AutocompleteMethod
+      - FacetsMethod
+      - StatsMethod
+      - ProductsMethod
+      - ProductByIdMethod
+      - IndexDeleteMethod
+    Properties:
+      RestApiId: !Ref SearchApi
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref SearchApi
+      DeploymentId: !Ref ApiDeployment
+      StageName: prod
+
+  # -------------------------------------------------------------------
+  # 10. CloudWatch Log Groups
+  # -------------------------------------------------------------------
+  ConsumerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/dsql-cdc-opensearch-consumer
+      RetentionInDays: 30
+
+  SearchProxyLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/dsql-cdc-opensearch-search-proxy
+      RetentionInDays: 30
+
+Outputs:
+  ApiGatewayUrl:
+    Value: !Sub https://${SearchApi}.execute-api.${AWS::Region}.amazonaws.com/prod
+    Description: API Gateway URL
+  CollectionEndpoint:
+    Value: !GetAtt Collection.CollectionEndpoint
+    Description: OpenSearch Serverless collection endpoint
+  KinesisStreamArn:
+    Value: !GetAtt CdcKinesisStream.Arn
+    Description: Kinesis stream ARN
+  CdcRoleArn:
+    Value: !GetAtt CdcRole.Arn
+    Description: CDC role ARN for DSQL
+  DsqlClusterHost:
+    Value: !Sub "${DsqlClusterId}.dsql.${AWS::Region}.on.aws"
+    Description: DSQL cluster hostname for client connections
+  DsqlClusterId:
+    Value: !Ref DsqlClusterId
+    Description: DSQL cluster identifier
+  ConsumerDLQArn:
+    Value: !GetAtt ConsumerDLQ.Arn
+    Description: SQS Dead Letter Queue ARN for failed Kinesis CDC events
