@@ -1,0 +1,240 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  DSQL CDC Materialized Table pipeline.
+  Creates a Kinesis stream, CDC IAM role, Lambda consumer that maintains
+  daily_order_totals, SQS dead-letter queue, and Kinesis event-source mapping.
+
+Parameters:
+  DsqlClusterId:
+    Type: String
+    Description: DSQL cluster identifier
+  ArtifactBucketName:
+    Type: String
+    Description: S3 bucket containing the Lambda layer and code artifacts
+  LayerS3Key:
+    Type: String
+    Description: S3 key of the psycopg2 Lambda layer zip
+  ConsumerCodeS3Key:
+    Type: String
+    Description: S3 key of the consumer Lambda code zip (content-addressed so code changes redeploy)
+
+Resources:
+  # -------------------------------------------------------------------
+  # Kinesis Data Stream for CDC events
+  # -------------------------------------------------------------------
+  CdcKinesisStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      ShardCount: 1
+      StreamEncryption:
+        EncryptionType: KMS
+        KeyId: alias/aws/kinesis
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  # -------------------------------------------------------------------
+  # IAM role: DSQL -> Kinesis (CDC writes)
+  # -------------------------------------------------------------------
+  CdcRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Allows DSQL to write CDC events to Kinesis for the materialized table pattern
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: dsql.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:aws:dsql:*:${AWS::AccountId}:cluster/*"
+      Policies:
+        - PolicyName: WriteToKinesisStream
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteToKinesisStream
+                Effect: Allow
+                Action:
+                  - kinesis:PutRecord
+                  - kinesis:PutRecords
+                  - kinesis:DescribeStreamSummary
+                  - kinesis:ListShards
+                Resource: !GetAtt CdcKinesisStream.Arn
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  # -------------------------------------------------------------------
+  # SQS Dead Letter Queue for failed CDC events
+  # -------------------------------------------------------------------
+  ConsumerDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  # -------------------------------------------------------------------
+  # Lambda execution role
+  # -------------------------------------------------------------------
+  ConsumerFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Execution role for the CDC materialized table consumer Lambda
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      # Inline so the permissions exist before the event source mapping and
+      # its DLQ destination are validated on create.
+      Policies:
+        - PolicyName: DsqlDbConnectAdmin
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DsqlDbConnectAdmin
+                Effect: Allow
+                Action:
+                  - dsql:DbConnectAdmin
+                Resource: !Sub "arn:aws:dsql:${AWS::Region}:${AWS::AccountId}:cluster/${DsqlClusterId}"
+        - PolicyName: ReadKinesisStream
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadKinesisStream
+                Effect: Allow
+                Action:
+                  - kinesis:DescribeStream
+                  - kinesis:DescribeStreamSummary
+                  - kinesis:GetShardIterator
+                  - kinesis:GetRecords
+                  - kinesis:ListShards
+                  - kinesis:SubscribeToShard
+                Resource: !GetAtt CdcKinesisStream.Arn
+        - PolicyName: WriteDLQ
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteDLQ
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt ConsumerDLQ.Arn
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  # -------------------------------------------------------------------
+  # Lambda layer: psycopg2-binary for PostgreSQL connectivity
+  # -------------------------------------------------------------------
+  PsycopgLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      Description: psycopg2-binary for Python 3.12 (x86_64)
+      CompatibleRuntimes:
+        - python3.12
+      CompatibleArchitectures:
+        - x86_64
+      Content:
+        S3Bucket: !Ref ArtifactBucketName
+        S3Key: !Ref LayerS3Key
+
+  # -------------------------------------------------------------------
+  # Lambda function: CDC consumer for materialized table updates
+  # -------------------------------------------------------------------
+  ConsumerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      RetentionInDays: 30
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  ConsumerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Consumes DSQL CDC events from Kinesis and maintains the daily_order_totals aggregate table
+      Runtime: python3.12
+      Architectures:
+        - x86_64
+      Handler: index.handler
+      Timeout: 120
+      MemorySize: 256
+      Role: !GetAtt ConsumerFunctionRole.Arn
+      LoggingConfig:
+        LogGroup: !Ref ConsumerLogGroup
+      Environment:
+        Variables:
+          DSQL_CLUSTER_HOST: !Sub "${DsqlClusterId}.dsql.${AWS::Region}.on.aws"
+          LOG_LEVEL: INFO
+      Layers:
+        - !Ref PsycopgLayer
+      Code:
+        S3Bucket: !Ref ArtifactBucketName
+        S3Key: !Ref ConsumerCodeS3Key
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  # -------------------------------------------------------------------
+  # Kinesis event source mapping
+  # -------------------------------------------------------------------
+  # The consumer reports unprocessable records individually. Kinesis then
+  # retries from the lowest failed sequence number; re-applying records is
+  # a no-op, so retries are safe. After MaximumRetryAttempts the failed
+  # batch's metadata goes to the DLQ.
+  ConsumerEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      FunctionName: !Ref ConsumerFunction
+      EventSourceArn: !GetAtt CdcKinesisStream.Arn
+      StartingPosition: TRIM_HORIZON
+      BatchSize: 100
+      MaximumBatchingWindowInSeconds: 10
+      MaximumRetryAttempts: 3
+      MaximumRecordAgeInSeconds: 86400
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt ConsumerDLQ.Arn
+
+Outputs:
+  KinesisStreamArn:
+    Value: !GetAtt CdcKinesisStream.Arn
+    Description: ARN of the Kinesis Data Stream for CDC events
+  CdcRoleArn:
+    Value: !GetAtt CdcRole.Arn
+    Description: ARN of the IAM role used by DSQL to write CDC events
+  ConsumerFunctionArn:
+    Value: !GetAtt ConsumerFunction.Arn
+    Description: ARN of the CDC materialized table consumer Lambda
+  ConsumerFunctionName:
+    Value: !Ref ConsumerFunction
+    Description: Name of the CDC materialized table consumer Lambda
+  DsqlClusterHost:
+    Value: !Sub "${DsqlClusterId}.dsql.${AWS::Region}.on.aws"
+    Description: DSQL cluster hostname for client connections
+  DsqlClusterId:
+    Value: !Ref DsqlClusterId
+    Description: DSQL cluster identifier
+  ConsumerDLQArn:
+    Value: !GetAtt ConsumerDLQ.Arn
+    Description: SQS Dead Letter Queue ARN for failed Kinesis CDC events
+  ConsumerDLQUrl:
+    Value: !Ref ConsumerDLQ
+    Description: SQS Dead Letter Queue URL for failed Kinesis CDC events
