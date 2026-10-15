@@ -144,7 +144,7 @@ OpenSearch external versioning (`version_type=external`) would reject stale writ
 
 ## Security
 
-- Amazon OpenSearch Serverless: VPC-only network policy (no public access), AWS-owned encryption key, and data access policies scoped to the `products` index per Lambda role
+- Amazon OpenSearch Serverless: VPC-only network policy (no public access), AWS-owned encryption key, and data access policies scoped per Lambda role to the `products` index (plus `DescribeCollectionItems` on the collection)
 - Amazon API Gateway: IAM (SigV4) authentication on every method
 - AWS Lambda: runs in isolated subnets with no NAT or internet gateway; security group egress limited to HTTPS inside the VPC
 - Amazon Kinesis: KMS encryption at rest

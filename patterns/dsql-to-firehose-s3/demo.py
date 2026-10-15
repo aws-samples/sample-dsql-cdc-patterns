@@ -278,8 +278,8 @@ def fetch_events(s3_client, bucket, date):
         print("  No events found.\n")
         return
 
-    print(f"  {'Op':<4} {'Table':<12} {'Commit time':<28} {'TX ID':<30} {'Row (after, or PK for deletes)'}")
-    print(f"  {'-'*4} {'-'*12} {'-'*28} {'-'*30} {'-'*40}")
+    print(f"  {'Op':<4} {'Table':<12} {'Commit time':<33} {'TX ID':<30} {'Row (after, or PK for deletes)'}")
+    print(f"  {'-'*4} {'-'*12} {'-'*33} {'-'*30} {'-'*40}")
     for e in display:
         op = e.get("op", "?")
         table = e.get("table", "?")
@@ -288,7 +288,7 @@ def fetch_events(s3_client, bucket, date):
         # Deletes carry only the primary key, in "before".
         row = e.get("before") if op == "d" else e.get("after")
         row_str = json.dumps(row, separators=(",", ":"))[:40] if row else "null"
-        print(f"  {op:<4} {table:<12} {ts:<28} {tx_id:<30} {row_str}")
+        print(f"  {op:<4} {table:<12} {ts:<33} {tx_id:<30} {row_str}")
     print()
 
 

@@ -13,7 +13,7 @@ This is a readable copy of the inline Lambda code in the CFN template.
 It is NOT deployed from here -- the template uses ZipFile inline code.
 """
 
-import json,os,re,urllib.request,urllib.error
+import hashlib,json,os,re,urllib.request,urllib.error
 
 ENDPOINT=os.environ['COLLECTION_ENDPOINT']
 INDEX=os.environ.get('INDEX_NAME','products')
@@ -34,6 +34,8 @@ def _sign(method,url,body,headers):
     from botocore.session import Session as BotoSession
     creds=BotoSession().get_credentials().get_frozen_credentials()
     req=AWSRequest(method=method,url=url,data=body,headers=headers)
+    # OpenSearch Serverless rejects SigV4 requests without a payload hash.
+    req.headers['X-Amz-Content-Sha256']=hashlib.sha256(body or b'').hexdigest()
     SigV4Auth(creds,SERVICE,REGION).add_auth(req)
     return dict(req.headers)
 
