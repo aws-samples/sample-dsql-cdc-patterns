@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 200" font-family="'Amazon Ember', 'Helvetica Neue', Roboto, Arial, sans-serif">
+  <defs>
+    <linearGradient id="dsql" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3B48CC"/>
+      <stop offset="100%" stop-color="#2E27AD"/>
+    </linearGradient>
+    <linearGradient id="kinesis" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#8C4FFF"/>
+      <stop offset="100%" stop-color="#6B3BC2"/>
+    </linearGradient>
+    <linearGradient id="lambda" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ED7100"/>
+      <stop offset="100%" stop-color="#C25500"/>
+    </linearGradient>
+    <linearGradient id="opensearch" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#005EB8"/>
+      <stop offset="100%" stop-color="#00478C"/>
+    </linearGradient>
+    <linearGradient id="apigw" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#E7157B"/>
+      <stop offset="100%" stop-color="#BF1260"/>
+    </linearGradient>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.15"/>
+    </filter>
+    <marker id="arrow" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <path d="M0,0 L7,2.5 L0,5" fill="#879196"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="720" height="200" rx="8" fill="#F2F3F3"/>
+
+  <!-- Header bar -->
+  <rect x="0" y="0" width="720" height="38" rx="8" fill="#232F3E"/>
+  <rect x="0" y="8" width="720" height="30" fill="#232F3E"/>
+  <rect x="0" y="38" width="720" height="3" fill="#FF9900"/>
+  <text x="360" y="26" text-anchor="middle" fill="#FFFFFF" font-size="13" font-weight="600" letter-spacing="0.5">DSQL CDC  &#x2192;  OpenSearch Serverless</text>
+
+  <!-- ===== ROW 1: CDC Ingestion Pipeline ===== -->
+  <!-- Aurora DSQL -->
+  <rect x="18" y="56" width="120" height="44" rx="8" fill="url(#dsql)" filter="url(#shadow)"/>
+  <rect x="24" y="62" width="4" height="32" rx="2" fill="#FF9900" opacity="0.7"/>
+  <text x="82" y="75" text-anchor="middle" fill="#FFFFFF" font-size="10" font-weight="600">Aurora DSQL</text>
+  <text x="82" y="90" text-anchor="middle" fill="#C5CAE9" font-size="8">Source Database</text>
+
+  <!-- Arrow: DSQL → Kinesis -->
+  <line x1="138" y1="78" x2="170" y2="78" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="143" y="65" width="22" height="11" rx="3" fill="#FF9900"/>
+  <text x="154" y="73" text-anchor="middle" fill="#FFFFFF" font-size="6.5" font-weight="600">CDC</text>
+
+  <!-- Kinesis -->
+  <rect x="176" y="56" width="120" height="44" rx="8" fill="url(#kinesis)" filter="url(#shadow)"/>
+  <rect x="182" y="62" width="4" height="32" rx="2" fill="#FF9900" opacity="0.7"/>
+  <text x="240" y="75" text-anchor="middle" fill="#FFFFFF" font-size="10" font-weight="600">Kinesis</text>
+  <text x="240" y="90" text-anchor="middle" fill="#D1C4E9" font-size="8">Data Stream</text>
+
+  <!-- Arrow: Kinesis → Lambda Consumer -->
+  <line x1="296" y1="78" x2="328" y2="78" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Lambda (Consumer) -->
+  <rect x="334" y="56" width="120" height="44" rx="8" fill="url(#lambda)" filter="url(#shadow)"/>
+  <text x="394" y="75" text-anchor="middle" fill="#FFFFFF" font-size="10" font-weight="600">Lambda</text>
+  <text x="394" y="90" text-anchor="middle" fill="#FFE0B2" font-size="8">Consumer</text>
+
+  <!-- Arrow: Lambda → OpenSearch -->
+  <line x1="454" y1="78" x2="486" y2="78" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- OpenSearch Serverless -->
+  <rect x="492" y="56" width="138" height="44" rx="8" fill="url(#opensearch)" filter="url(#shadow)"/>
+  <text x="561" y="75" text-anchor="middle" fill="#FFFFFF" font-size="10" font-weight="600">OpenSearch</text>
+  <text x="561" y="90" text-anchor="middle" fill="#B3E5FC" font-size="8">Serverless</text>
+
+  <!-- Row label -->
+  <text x="360" y="116" text-anchor="middle" fill="#545B64" font-size="8" font-weight="600">INGESTION PIPELINE</text>
+
+  <!-- Divider line -->
+  <line x1="30" y1="124" x2="690" y2="124" stroke="#D5DBDB" stroke-width="1"/>
+
+  <!-- ===== ROW 2: Search / Query Path ===== -->
+  <!-- Demo App -->
+  <rect x="18" y="140" width="100" height="40" rx="8" fill="#FFFFFF" stroke="#D5DBDB" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="68" y="157" text-anchor="middle" fill="#232F3E" font-size="10" font-weight="600">Demo App</text>
+  <text x="68" y="170" text-anchor="middle" fill="#545B64" font-size="8">Client</text>
+
+  <!-- Arrow: Demo App → API Gateway -->
+  <line x1="118" y1="160" x2="150" y2="160" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- API Gateway -->
+  <rect x="156" y="140" width="120" height="40" rx="8" fill="url(#apigw)" filter="url(#shadow)"/>
+  <text x="216" y="157" text-anchor="middle" fill="#FFFFFF" font-size="10" font-weight="600">API Gateway</text>
+  <text x="216" y="170" text-anchor="middle" fill="#F8BBD0" font-size="8">REST API</text>
+
+  <!-- Arrow: API GW → Lambda Search Proxy -->
+  <line x1="276" y1="160" x2="328" y2="160" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Lambda (Search Proxy) -->
+  <rect x="334" y="140" width="120" height="40" rx="8" fill="url(#lambda)" filter="url(#shadow)"/>
+  <text x="394" y="157" text-anchor="middle" fill="#FFFFFF" font-size="10" font-weight="600">Lambda</text>
+  <text x="394" y="170" text-anchor="middle" fill="#FFE0B2" font-size="8">Search Proxy</text>
+
+  <!-- Arrow: Lambda Search Proxy → OpenSearch -->
+  <line x1="454" y1="160" x2="486" y2="160" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- OpenSearch again (query side) -->
+  <rect x="492" y="140" width="138" height="40" rx="8" fill="url(#opensearch)" filter="url(#shadow)"/>
+  <text x="561" y="157" text-anchor="middle" fill="#FFFFFF" font-size="10" font-weight="600">OpenSearch</text>
+  <text x="561" y="170" text-anchor="middle" fill="#B3E5FC" font-size="8">Serverless</text>
+
+  <!-- Row label -->
+  <text x="660" y="165" text-anchor="middle" fill="#545B64" font-size="8" font-weight="600">QUERY</text>
+</svg>

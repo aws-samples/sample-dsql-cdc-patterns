@@ -1,0 +1,328 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  DSQL CDC to S3 via Firehose (Python sample).
+  Creates a Kinesis stream, Firehose delivery stream, S3 bucket,
+  IAM roles, and an optional Lambda transform for CDC event flattening.
+
+Parameters:
+  DsqlClusterId:
+    Type: String
+    Description: DSQL cluster identifier
+  EnableLambdaTransform:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Attach a Lambda that flattens CDC records before S3 delivery
+
+Conditions:
+  UseTransform: !Equals [!Ref EnableLambdaTransform, 'true']
+
+Resources:
+  # -------------------------------------------------------------------
+  # Kinesis Data Stream for CDC events
+  # -------------------------------------------------------------------
+  CdcKinesisStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      ShardCount: 1
+      StreamEncryption:
+        EncryptionType: KMS
+        KeyId: alias/aws/kinesis
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  # -------------------------------------------------------------------
+  # IAM role: DSQL -> Kinesis (CDC writes)
+  # -------------------------------------------------------------------
+  CdcRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Allows DSQL to write CDC events to Kinesis
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: dsql.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:aws:dsql:*:${AWS::AccountId}:cluster/*"
+      Policies:
+        - PolicyName: WriteToKinesisStream
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteToKinesisStream
+                Effect: Allow
+                Action:
+                  - kinesis:PutRecord
+                  - kinesis:PutRecords
+                  - kinesis:DescribeStreamSummary
+                  - kinesis:ListShards
+                Resource: !GetAtt CdcKinesisStream.Arn
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  # -------------------------------------------------------------------
+  # S3 bucket for CDC event storage
+  # -------------------------------------------------------------------
+  CdcBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 90
+          - Id: TransitionToGlacier
+            Status: Enabled
+            Transitions:
+              - StorageClass: GLACIER
+                TransitionInDays: 365
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  CdcBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CdcBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub "arn:aws:s3:::${CdcBucket}"
+              - !Sub "arn:aws:s3:::${CdcBucket}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  # -------------------------------------------------------------------
+  # CloudWatch logging for Firehose
+  # -------------------------------------------------------------------
+  FirehoseLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      RetentionInDays: 30
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  FirehoseLogStream:
+    Type: AWS::Logs::LogStream
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Ref FirehoseLogGroup
+      LogStreamName: S3Delivery
+
+  # -------------------------------------------------------------------
+  # Optional Lambda transform
+  # -------------------------------------------------------------------
+  TransformFunctionRole:
+    Type: AWS::IAM::Role
+    Condition: UseTransform
+    Properties:
+      Description: Lambda execution role for CDC transform function
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  TransformFunction:
+    Type: AWS::Lambda::Function
+    Condition: UseTransform
+    Properties:
+      Description: Flattens DSQL CDC events for Firehose S3 delivery
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 60
+      MemorySize: 256
+      Role: !GetAtt TransformFunctionRole.Arn
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+      Code:
+        ZipFile: |
+          import base64,json
+          from datetime import datetime,timezone
+          # DSQL CDC: txId/ts_ms/ts_ns (commit times) live under "source";
+          # top-level ts_ms/ts_ns are CDC processing times.
+          def handler(event,context):
+              out=[]
+              for r in event.get('records',[]):
+                  try:
+                      p=json.loads(base64.b64decode(r['data']))
+                      # Chunked/fragment records need stateful reassembly.
+                      if p.get('type','full')!='full':
+                          out.append({'recordId':r['recordId'],'result':'ProcessingFailed','data':r['data']})
+                          continue
+                      s=p.get('source',{});t=s.get('ts_ms',0)
+                      f={'op':p.get('op'),'table':s.get('table'),'schema':s.get('schema'),
+                         'db':s.get('db'),'cluster':s.get('cluster'),'tx_id':s.get('txId'),
+                         'ts':datetime.fromtimestamp(t/1000.0,tz=timezone.utc).isoformat(),
+                         'ts_ms':t,'commit_ts_ns':s.get('ts_ns'),
+                         'before':p.get('before'),'after':p.get('after')}
+                      d=base64.b64encode((json.dumps(f,separators=(',',':'))+'\n').encode()).decode()
+                      out.append({'recordId':r['recordId'],'result':'Ok','data':d})
+                  except Exception:
+                      out.append({'recordId':r['recordId'],'result':'ProcessingFailed','data':r['data']})
+              return {'records':out}
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  # -------------------------------------------------------------------
+  # IAM role for Firehose
+  # -------------------------------------------------------------------
+  FirehoseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Allows Firehose to read from Kinesis and write to S3
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: FirehoseDeliveryPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadFromKinesisStream
+                Effect: Allow
+                Action:
+                  - kinesis:DescribeStream
+                  - kinesis:DescribeStreamSummary
+                  - kinesis:GetShardIterator
+                  - kinesis:GetRecords
+                  - kinesis:ListShards
+                  - kinesis:SubscribeToShard
+                Resource: !GetAtt CdcKinesisStream.Arn
+              - Sid: WriteToS3Bucket
+                Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                  - s3:PutObject
+                Resource:
+                  - !GetAtt CdcBucket.Arn
+                  - !Sub "${CdcBucket.Arn}/*"
+              - Sid: WriteCloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:PutLogEvents
+                Resource: !GetAtt FirehoseLogGroup.Arn
+              # Inline (not a separate AWS::IAM::Policy) so the permission
+              # exists before Firehose validates the processor on create.
+              - !If
+                - UseTransform
+                - Sid: InvokeLambdaTransform
+                  Effect: Allow
+                  Action:
+                    - lambda:InvokeFunction
+                    - lambda:GetFunctionConfiguration
+                  Resource:
+                    - !GetAtt TransformFunction.Arn
+                    - !Sub "${TransformFunction.Arn}:*"
+                - !Ref AWS::NoValue
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+  # -------------------------------------------------------------------
+  # Firehose delivery stream
+  # -------------------------------------------------------------------
+  CdcDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamType: KinesisStreamAsSource
+      KinesisStreamSourceConfiguration:
+        KinesisStreamARN: !GetAtt CdcKinesisStream.Arn
+        RoleARN: !GetAtt FirehoseRole.Arn
+      ExtendedS3DestinationConfiguration:
+        BucketARN: !GetAtt CdcBucket.Arn
+        RoleARN: !GetAtt FirehoseRole.Arn
+        BufferingHints:
+          SizeInMBs: 1
+          IntervalInSeconds: 10
+        CompressionFormat: GZIP
+        Prefix: "cdc-events/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/"
+        ErrorOutputPrefix: "cdc-errors/!{firehose:error-output-type}/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/"
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: !Ref FirehoseLogGroup
+          LogStreamName: !Ref FirehoseLogStream
+        ProcessingConfiguration: !If
+          - UseTransform
+          - Enabled: true
+            Processors:
+              - Type: Lambda
+                Parameters:
+                  - ParameterName: LambdaArn
+                    ParameterValue: !GetAtt TransformFunction.Arn
+                  - ParameterName: BufferSizeInMBs
+                    ParameterValue: '3'
+                  - ParameterName: BufferIntervalInSeconds
+                    ParameterValue: '60'
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: Project
+          Value: dsql-cdc-samples
+
+Outputs:
+  CdcBucketName:
+    Value: !Ref CdcBucket
+    Description: S3 bucket receiving CDC events from Firehose
+  CdcBucketArn:
+    Value: !GetAtt CdcBucket.Arn
+    Description: ARN of the CDC S3 bucket
+  KinesisStreamArn:
+    Value: !GetAtt CdcKinesisStream.Arn
+    Description: ARN of the Kinesis Data Stream for CDC events
+  CdcRoleArn:
+    Value: !GetAtt CdcRole.Arn
+    Description: ARN of the IAM role used by DSQL to write CDC events
+  DsqlClusterHost:
+    Value: !Sub "${DsqlClusterId}.dsql.${AWS::Region}.on.aws"
+    Description: DSQL cluster hostname for client connections
+  DsqlClusterId:
+    Value: !Ref DsqlClusterId
+    Description: DSQL cluster identifier

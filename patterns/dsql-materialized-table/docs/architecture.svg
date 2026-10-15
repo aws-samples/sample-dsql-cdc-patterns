@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 160" font-family="'Amazon Ember', 'Helvetica Neue', Roboto, Arial, sans-serif">
+  <defs>
+    <linearGradient id="dsql" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3B48CC"/>
+      <stop offset="100%" stop-color="#2E27AD"/>
+    </linearGradient>
+    <linearGradient id="kinesis" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#8C4FFF"/>
+      <stop offset="100%" stop-color="#6B3BC2"/>
+    </linearGradient>
+    <linearGradient id="lambda" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ED7100"/>
+      <stop offset="100%" stop-color="#C25500"/>
+    </linearGradient>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.15"/>
+    </filter>
+    <marker id="arrow" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <path d="M0,0 L7,2.5 L0,5" fill="#879196"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="720" height="160" rx="8" fill="#F2F3F3"/>
+
+  <!-- Header bar -->
+  <rect x="0" y="0" width="720" height="38" rx="8" fill="#232F3E"/>
+  <rect x="0" y="8" width="720" height="30" fill="#232F3E"/>
+  <rect x="0" y="38" width="720" height="3" fill="#FF9900"/>
+  <text x="360" y="26" text-anchor="middle" fill="#FFFFFF" font-size="13" font-weight="600" letter-spacing="0.5">DSQL CDC  &#x2192;  Materialized Table</text>
+
+  <!-- Aurora DSQL (orders) -->
+  <rect x="30" y="62" width="130" height="48" rx="8" fill="url(#dsql)" filter="url(#shadow)"/>
+  <rect x="36" y="68" width="4" height="36" rx="2" fill="#FF9900" opacity="0.7"/>
+  <text x="100" y="83" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">Aurora DSQL</text>
+  <text x="100" y="99" text-anchor="middle" fill="#C5CAE9" font-size="9">orders</text>
+
+  <!-- Arrow: DSQL → Kinesis -->
+  <line x1="160" y1="86" x2="196" y2="86" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="166" y="72" width="24" height="12" rx="3" fill="#FF9900"/>
+  <text x="178" y="81" text-anchor="middle" fill="#FFFFFF" font-size="7" font-weight="600">CDC</text>
+
+  <!-- Kinesis -->
+  <rect x="202" y="62" width="130" height="48" rx="8" fill="url(#kinesis)" filter="url(#shadow)"/>
+  <rect x="208" y="68" width="4" height="36" rx="2" fill="#FF9900" opacity="0.7"/>
+  <text x="272" y="83" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">Kinesis</text>
+  <text x="272" y="99" text-anchor="middle" fill="#D1C4E9" font-size="9">Data Stream</text>
+
+  <!-- Arrow: Kinesis → Lambda -->
+  <line x1="332" y1="86" x2="368" y2="86" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Lambda -->
+  <rect x="374" y="62" width="130" height="48" rx="8" fill="url(#lambda)" filter="url(#shadow)"/>
+  <text x="439" y="83" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">Lambda</text>
+  <text x="439" y="99" text-anchor="middle" fill="#FFE0B2" font-size="9">CDC Consumer</text>
+
+  <!-- Arrow: Lambda → DSQL target -->
+  <line x1="504" y1="86" x2="540" y2="86" stroke="#879196" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Aurora DSQL (daily_order_totals) -->
+  <rect x="546" y="62" width="150" height="48" rx="8" fill="url(#dsql)" filter="url(#shadow)"/>
+  <rect x="552" y="68" width="4" height="36" rx="2" fill="#FF9900" opacity="0.7"/>
+  <text x="626" y="83" text-anchor="middle" fill="#FFFFFF" font-size="11" font-weight="600">Aurora DSQL</text>
+  <text x="626" y="99" text-anchor="middle" fill="#C5CAE9" font-size="9">daily_order_totals</text>
+
+  <!-- Labels -->
+  <text x="100" y="128" text-anchor="middle" fill="#545B64" font-size="8" font-weight="500">Source Table</text>
+  <text x="626" y="128" text-anchor="middle" fill="#545B64" font-size="8" font-weight="500">Materialized Table</text>
+</svg>

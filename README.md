@@ -26,6 +26,17 @@ Amazon Data Firehose maintains two Iceberg tables from the same Kinesis data str
 
 See [DSQL CDC to Iceberg architecture](docs/architecture.md) for details.
 
+## More CDC Patterns
+
+The [`patterns/`](patterns/) directory has more ways to consume the same DSQL CDC stream. Each pattern is self-contained, with its own `deploy.sh`, `destroy.sh`, interactive demo, and README:
+
+| Pattern | Destination | Use case |
+|---------|-------------|----------|
+| [dsql-to-firehose-s3](patterns/dsql-to-firehose-s3/) | Amazon S3 via Amazon Data Firehose | Archival, compliance auditing, and batch analytics with Athena |
+| [dsql-to-opensearch](patterns/dsql-to-opensearch/) | Amazon OpenSearch Serverless | Full-text search over DSQL data |
+| [dsql-to-s3-vectors](patterns/dsql-to-s3-vectors/) | Amazon S3 Vectors with Amazon Bedrock embeddings | Semantic search over DSQL data |
+| [dsql-materialized-table](patterns/dsql-materialized-table/) | An aggregate table in DSQL | Incrementally maintained materialized views |
+
 ## What Gets Deployed
 
 | Resource | Service | Purpose |
@@ -55,6 +66,7 @@ dashboard/              # Streamlit dashboard (run locally)
   lib/                  #   Config, DSQL connection, Athena helper
   requirements.txt      #   Python dependencies
 docs/                   # Architecture docs
+patterns/               # Additional self-contained CDC patterns (see above)
 ```
 
 ## Security
